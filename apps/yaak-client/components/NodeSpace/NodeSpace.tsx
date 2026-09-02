@@ -1,4 +1,4 @@
-import { httpRequestsAtom } from "@yaakapp-internal/models";
+import { duplicateModel, getModel, httpRequestsAtom } from "@yaakapp-internal/models";
 import { useAtomValue } from "jotai";
 import { useEffect, useRef, useState } from "react";
 import { activeRequestAtom } from "../../hooks/useActiveRequest";
@@ -8,8 +8,9 @@ import { showToast } from "../../lib/toast";
 import { Icon } from "@yaakapp-internal/ui";
 import { BranchPrompt } from "./BranchPrompt";
 import { FlowNode } from "./FlowNode";
-import { svgPath, topoSort } from "./graph";
+import { findFreePosition, svgPath, topoSort, wouldOverlap } from "./graph";
 import type { Node } from "./types";
+import { NODE_MIN_H, NODE_MIN_W } from "./types";
 import { useNodeGraph } from "./useNodeGraph";
 
 type Menu =
@@ -29,15 +30,17 @@ type Settings = {
     resetView: boolean;
     clearCanvas: boolean;
   };
-  node: { run: boolean; runFlow: boolean; del: boolean };
+  node: { run: boolean; runFlow: boolean; del: boolean; resize: boolean; duplicate: boolean };
   edge: { del: boolean };
+  layout: { noOverlap: boolean; gap: number };
 };
 
 const defaultSettings: Settings = {
   minimap: true,
   canvas: { addSelected: true, runAll: true, runSelected: true, runFlow: true, zoom: true, resetView: true, clearCanvas: true },
-  node: { run: true, runFlow: true, del: true },
+  node: { run: true, runFlow: true, del: true, resize: true, duplicate: true },
   edge: { del: true },
+  layout: { noOverlap: true, gap: 10 },
 };
 const SETTINGS_KEY = "node_space_settings";
 
@@ -61,6 +64,9 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [statusById, setStatusById] = useState<Record<string, "ok" | "err" | "run">>({});
+  const [elapsedById, setElapsedById] = useState<Record<string, number>>({});
+  const cancelRef = useRef(false);
+  const clipboardRef = useRef<Node | null>(null);
   const [branchPrompt, setBranchPrompt] = useState<{ from: string; targets: Node[] } | null>(null);
   const [flowRunning, setFlowRunning] = useState(false);
   const [branchPos, setBranchPos] = useState<{ x: number; y: number } | null>(null);
@@ -81,6 +87,32 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
     setZoom(1);
     setPan({ x: 0, y: 0 });
   };
+  const fitView = () => {
+    if (nodes.length === 0) {
+      viewReset();
+      return;
+    }
+    const rect = canvasRef.current?.getBoundingClientRect();
+    const pad = 80;
+    const vw = rect?.width ?? 800;
+    const vh = rect?.height ?? 600;
+    let minX = Math.min(...nodes.map((n) => n.x));
+    let minY = Math.min(...nodes.map((n) => n.y));
+    let maxX = Math.max(...nodes.map((n) => n.x + (n.w ?? NODE_MIN_W)));
+    let maxY = Math.max(...nodes.map((n) => n.y + (n.h ?? NODE_MIN_H)));
+    const w = maxX - minX;
+    const h = maxY - minY;
+    const scale = Math.min((vw - pad * 2) / w, (vh - pad * 2) / h, 1.5);
+    const nz = Math.max(0.4, Math.min(2.5, Math.round(scale * 100) / 100));
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    setZoom(nz);
+    setPan({ x: vw / 2 - cx * nz, y: vh / 2 - cy * nz });
+  };
+  const clearStatus = () => {
+    setStatusById({});
+    setElapsedById({});
+  };
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState<Settings>(() => {
     try {
@@ -92,6 +124,7 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
           canvas: { ...defaultSettings.canvas, ...(parsed.canvas ?? {}) },
           node: { ...defaultSettings.node, ...(parsed.node ?? {}) },
           edge: { ...defaultSettings.edge, ...(parsed.edge ?? {}) },
+          layout: { ...defaultSettings.layout, ...(parsed.layout ?? {}) },
         };
       }
     } catch {}
@@ -130,8 +163,8 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
       const ys = nodes.map((n) => n.y);
       const nMinX = Math.min(...xs);
       const nMinY = Math.min(...ys);
-      const nMaxX = Math.max(...nodes.map((n) => n.x + 140));
-      const nMaxY = Math.max(...nodes.map((n) => n.y + 44));
+      const nMaxX = Math.max(...nodes.map((n) => n.x + (n.w ?? NODE_MIN_W)));
+      const nMaxY = Math.max(...nodes.map((n) => n.y + (n.h ?? NODE_MIN_H)));
       minX = Math.min(minX, nMinX - 80);
       minY = Math.min(minY, nMinY - 80);
       maxX = Math.max(maxX, nMaxX + 80);
@@ -214,7 +247,43 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
+      const isInput = (document.activeElement as HTMLElement | null)?.closest?.("input, textarea, [contenteditable=true]");
+      const mod = e.ctrlKey || e.metaKey;
+      // copy
+      if (mod && e.key.toLowerCase() === "c" && selectedId && !isInput) {
+        if (!settings.node.duplicate) return;
+        const n = nodes.find((nn) => nn.id === selectedId);
+        if (n) {
+          clipboardRef.current = n;
+          // also put requestId on clipboard for external paste
+          try { navigator.clipboard?.writeText(n.data.requestId).catch(() => {}); } catch {}
+          showToast({ message: `Copied ${n.data.name}`, color: "notice" });
+          e.preventDefault();
+        }
+        return;
+      }
+      // paste - duplicate request with new name then add to canvas
+      if (mod && e.key.toLowerCase() === "v" && !isInput) {
+        if (!settings.node.duplicate) return;
+        const src = clipboardRef.current;
+        if (src) {
+          void duplicateRequestAndAddNode(src.id);
+          e.preventDefault();
+        } else if (selectedId) {
+          void duplicateRequestAndAddNode(selectedId);
+          e.preventDefault();
+        }
+        return;
+      }
+      // quick duplicate via Ctrl/Cmd+D
+      if (mod && e.key.toLowerCase() === "d" && selectedId && !isInput) {
+        if (!settings.node.duplicate) return;
+        void duplicateRequestAndAddNode(selectedId);
+        e.preventDefault();
+        return;
+      }
       if (e.key === "Delete" || e.key === "Backspace") {
+        if (isInput) return;
         if (selectedEdgeId) {
           setEdges((prev) => {
             const next = prev.filter((ee) => ee.id !== selectedEdgeId);
@@ -249,17 +318,24 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [selectedId, selectedEdgeId, saveSoon, setEdges, setNodes]);
+  }, [selectedId, selectedEdgeId, saveSoon, setEdges, setNodes, nodes, httpRequests, settings.node.duplicate]);
 
   const onCanvasDrop = (e: React.DragEvent) => {
     e.preventDefault();
     const rect = canvasRef.current!.getBoundingClientRect();
-    const x = (e.clientX - rect.left - pan.x) / zoom - 40;
-    const y = (e.clientY - rect.top - pan.y) / zoom - 20;
+    let x = (e.clientX - rect.left - pan.x) / zoom - 40;
+    let y = (e.clientY - rect.top - pan.y) / zoom - 20;
+    x = Math.round(x / 10) * 10;
+    y = Math.round(y / 10) * 10;
     const tryAdd = (id: string) => {
       const req = httpRequests.find((r) => r.id === id);
       if (req) {
-        addNode(req, x, y);
+        let fx = x, fy = y;
+        if (settings.layout.noOverlap) {
+          const free = findFreePosition(x, y, NODE_MIN_W, NODE_MIN_H, nodes, settings.layout.gap);
+          fx = free.x; fy = free.y;
+        }
+        addNode(req, fx, fy);
         return true;
       }
       return false;
@@ -279,10 +355,15 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
       return;
     }
     if (activeRequest && (activeRequest as unknown as { model: string }).model === "http_request") {
+      let fx = x, fy = y;
+      if (settings.layout.noOverlap) {
+        const free = findFreePosition(x, y, NODE_MIN_W, NODE_MIN_H, nodes, settings.layout.gap);
+        fx = free.x; fy = free.y;
+      }
       addNode(
         activeRequest as unknown as { id: string; name: string; method: string; url: string },
-        x,
-        y,
+        fx,
+        fy,
       );
     } else {
       showToast({
@@ -292,62 +373,169 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
     }
   };
 
+  // ponytail: single helper for delay/retry/elapsed; per-node vars if needed later
+  const execNode = async (node: Node) => {
+    const delay = Math.max(0, node.data.delayMs ?? 0);
+    if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+    if (cancelRef.current) return { ok: false, cancelled: true as const };
+    const retries = Math.max(0, Math.min(5, node.data.retry ?? 0));
+    const t0 = Date.now();
+    let lastErr: unknown = null;
+    let lastRes: Awaited<ReturnType<typeof sendAnyHttpRequest.mutateAsync>> = null;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      if (cancelRef.current) return { ok: false, cancelled: true as const };
+      try {
+        const res = await sendAnyHttpRequest.mutateAsync(node.data.requestId);
+        lastRes = res;
+        const ok = !!res && res.status < 400;
+        if (ok || attempt === retries) {
+          const elapsed = Date.now() - t0;
+          setElapsedById((m) => ({ ...m, [node.id]: elapsed }));
+          setStatusById((m) => ({ ...m, [node.id]: ok ? "ok" : "err" }));
+          return { ok, res, elapsed };
+        }
+        // retry after short backoff
+        await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+      } catch (e) {
+        lastErr = e;
+        if (attempt === retries) {
+          const elapsed = Date.now() - t0;
+          setElapsedById((m) => ({ ...m, [node.id]: elapsed }));
+          setStatusById((m) => ({ ...m, [node.id]: "err" }));
+          return { ok: false, error: e, elapsed };
+        }
+        await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+      }
+    }
+    const elapsed = Date.now() - t0;
+    setElapsedById((m) => ({ ...m, [node.id]: elapsed }));
+    setStatusById((m) => ({ ...m, [node.id]: "err" }));
+    return { ok: false, error: lastErr, res: lastRes, elapsed };
+  };
+
+  const duplicateRequestAndAddNode = async (nodeId: string) => {
+    const src = nodes.find((n) => n.id === nodeId);
+    if (!src) {
+      showToast({ message: "No node selected", color: "warning" });
+      return;
+    }
+    const origModel = getModel("http_request", src.data.requestId) as unknown as { id: string; name: string; method: string; url: string } | null;
+    const fallbackReq = httpRequests.find((r) => r.id === src.data.requestId);
+    const modelToDup = origModel ?? (fallbackReq as unknown as { id: string; model: string } | null);
+    if (!modelToDup) {
+      showToast({ message: "Original request not found", color: "danger" });
+      return;
+    }
+    try {
+      const newId = await duplicateModel(modelToDup as unknown as Parameters<typeof duplicateModel>[0]);
+      // wait briefly for model store to sync (duplicateModel resolves before store event)
+      let newReq: { id: string; name: string; method: string; url: string } | null = null;
+      for (let i = 0; i < 20; i++) {
+        const m = getModel("http_request", newId) as unknown as { id: string; name: string; method: string; url: string } | null;
+        if (m) { newReq = m; break; }
+        const fromList = httpRequests.find((r) => r.id === newId) as unknown as { id: string; name: string; method: string; url: string } | null;
+        if (fromList) { newReq = fromList; break; }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      if (!newReq) {
+        // fallback: use orig data with incremented name
+        const orig = (origModel ?? fallbackReq) as unknown as { name: string; method: string; url: string };
+        newReq = { id: newId, name: `${orig.name} Copy`, method: orig.method, url: orig.url };
+      }
+      // offset slightly so paste is visible; snap to grid, then find free spot if noOverlap
+      let nx = Math.round((src.x + 40) / 10) * 10;
+      let ny = Math.round((src.y + 40) / 10) * 10;
+      if (settings.layout.noOverlap) {
+        const w = src.w ?? NODE_MIN_W;
+        const h = src.h ?? NODE_MIN_H;
+        const free = findFreePosition(nx, ny, w, h, nodes, settings.layout.gap);
+        nx = free.x; ny = free.y;
+      }
+      const newNodeId = addNode(newReq, nx, ny);
+      setSelectedId(newNodeId);
+      showToast({ message: `Duplicated ${newReq.name}`, color: "success" });
+    } catch (err) {
+      showToast({ message: `Duplicate failed: ${String(err)}`, color: "danger" });
+    }
+  };
+
+  const cancelRun = () => {
+    cancelRef.current = true;
+    showToast({ message: "Cancelling…", color: "notice" });
+  };
+
   const run = async () => {
     if (nodes.length === 0) {
       showToast({ message: "Add nodes first", color: "notice" });
       return;
     }
+    cancelRef.current = false;
     setRunning(true);
     const order = topoSort(nodes, edges);
-    const results: unknown[] = [];
+    const results: { ok: boolean }[] = [];
     for (const nid of order) {
+      if (cancelRef.current) {
+        showToast({ message: "Run cancelled", color: "notice" });
+        break;
+      }
       const node = nodes.find((n) => n.id === nid);
       if (!node) continue;
       setStatusById((m) => ({ ...m, [nid]: "run" }));
       await new Promise((r) => setTimeout(r, 0));
-      try {
-        const res = await sendAnyHttpRequest.mutateAsync(node.data.requestId);
-        const ok = !!res && res.status < 400;
-        setStatusById((m) => ({ ...m, [nid]: ok ? "ok" : "err" }));
-        results.push({ nodeId: nid, name: node.data.name, status: res?.status ?? "unknown", ok });
-      } catch (e) {
-        setStatusById((m) => ({ ...m, [nid]: "err" }));
-        results.push({ nodeId: nid, name: node.data.name, error: String(e), ok: false });
+      const out = await execNode(node);
+      if ((out as { cancelled?: boolean }).cancelled) {
+        showToast({ message: "Run cancelled", color: "notice" });
+        break;
+      }
+      results.push({ ok: out.ok });
+      if (!out.ok && !node.data.continueOnError) {
+        showToast({ message: `${node.data.name} failed, stopping (toggle continueOnError to ignore)`, color: "warning" });
+        break;
       }
     }
-    showToast({
-      message: `Ran ${results.length} requests`,
-      color: (results as { ok: boolean }[]).some((r) => !r.ok) ? "warning" : "success",
-    });
+    if (!cancelRef.current) {
+      showToast({
+        message: `Ran ${results.length}/${order.length} requests`,
+        color: results.some((r) => !r.ok) ? "warning" : "success",
+      });
+    }
     setRunning(false);
+    cancelRef.current = false;
   };
 
   const runSingle = async (nodeId: string) => {
     const node = nodes.find((n) => n.id === nodeId);
     if (!node) return;
+    cancelRef.current = false;
     setRunning(true);
     setStatusById((m) => ({ ...m, [nodeId]: "run" }));
-    try {
-      const res = await sendAnyHttpRequest.mutateAsync(node.data.requestId);
-      setStatusById((m) => ({ ...m, [nodeId]: res && res.status < 400 ? "ok" : "err" }));
-      showToast({
-        message: `${node.data.name}: ${res?.status ?? "sent"}`,
-        color: res && res.status < 400 ? "success" : "warning",
-      });
-    } catch (e) {
-      setStatusById((m) => ({ ...m, [nodeId]: "err" }));
-      showToast({ message: `${node.data.name} failed: ${String(e)}`, color: "danger" });
+    const out = await execNode(node);
+    if ((out as { cancelled?: boolean }).cancelled) {
+      showToast({ message: "Cancelled", color: "notice" });
+    } else if (out.ok) {
+      const res = (out as { res?: { status?: number } }).res;
+      showToast({ message: `${node.data.name}: ${res?.status ?? "ok"}`, color: "success" });
+    } else {
+      const err = (out as { error?: unknown }).error;
+      const res = (out as { res?: { status?: number } }).res;
+      showToast({ message: `${node.data.name} failed${res?.status ? ` (${res.status})` : ""}${err ? `: ${String(err)}` : ""}`, color: "danger" });
     }
     setRunning(false);
+    cancelRef.current = false;
   };
 
   const runFlow = async (startId: string) => {
     const start = nodes.find((n) => n.id === startId);
     if (!start) return;
+    cancelRef.current = false;
     setFlowRunning(true);
     let cur: string | null = startId;
     const visited = new Set<string>();
     while (cur) {
+      if (cancelRef.current) {
+        showToast({ message: "Flow cancelled", color: "notice" });
+        break;
+      }
       if (visited.has(cur)) {
         showToast({ message: "Cycle detected, stopping", color: "warning" });
         break;
@@ -358,40 +546,74 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
       setSelectedId(cur);
       setStatusById((m) => ({ ...m, [cur!]: "run" }));
       await new Promise((r) => setTimeout(r, 0));
-      try {
-        const res = await sendAnyHttpRequest.mutateAsync(node.data.requestId);
-        const ok = !!res && res.status < 400;
-        setStatusById((m) => ({ ...m, [cur!]: ok ? "ok" : "err" }));
-        if (!ok) {
-          showToast({
-            message: `${node.data.name} failed (${res?.status}), stopping`,
-            color: "danger",
-          });
-          break;
-        }
-      } catch (e) {
-        setStatusById((m) => ({ ...m, [cur!]: "err" }));
-        showToast({ message: `${node.data.name} error: ${String(e)}`, color: "danger" });
+      const out = await execNode(node);
+      if ((out as { cancelled?: boolean }).cancelled) {
+        showToast({ message: "Flow cancelled", color: "notice" });
         break;
       }
-      const outs = edges.filter((e) => e.source === cur).map((e) => e.target);
+      if (!out.ok && !node.data.continueOnError) {
+        const res = (out as { res?: { status?: number } }).res;
+        showToast({ message: `${node.data.name} failed${res?.status ? ` (${res.status})` : ""}, stopping`, color: "danger" });
+        break;
+      }
+      const outs = edges.filter((e) => e.source === cur);
       if (outs.length === 0) {
         showToast({ message: "Flow complete", color: "success" });
         break;
       }
       if (outs.length === 1) {
-        cur = outs[0] ?? null;
+        cur = outs[0]!.target ?? null;
         continue;
       }
-      const targets = outs.map((id) => nodes.find((n) => n.id === id)).filter(Boolean) as Node[];
+      // try auto-resolve via edge condition based on last response status
+      const lastRes = (out as { res?: { status?: number } }).res;
+      const status = lastRes?.status;
+      const matches = (cond?: string) => {
+        if (!cond || cond === "always") return true;
+        if (status == null) return false;
+        if (cond === "ok") return status < 400;
+        if (cond === "error") return status >= 400;
+        if (cond === "2xx") return status >= 200 && status < 300;
+        if (cond === "3xx") return status >= 300 && status < 400;
+        if (cond === "4xx") return status >= 400 && status < 500;
+        if (cond === "5xx") return status >= 500 && status < 600;
+        const n = parseInt(cond, 10);
+        if (!isNaN(n)) return status === n;
+        return false;
+      };
+      const autoTargets = outs.filter((ed) => ed.condition && ed.condition !== "manual" && matches(ed.condition));
+      // if exactly one edge has matching condition, auto follow it without prompt
+      // if multiple match, or none match but some have conditions, fall back to prompt
+      // if no conditions defined at all, prompt (legacy behavior)
+      const hasAnyCondition = outs.some((ed) => ed.condition && ed.condition !== "manual" && ed.condition !== "always");
+      if (autoTargets.length === 1 && hasAnyCondition) {
+        cur = autoTargets[0]!.target;
+        continue;
+      }
+      if (autoTargets.length > 1) {
+        // multiple matching -> let user choose among matching only
+        const targets = autoTargets.map((ed) => nodes.find((n) => n.id === ed.target)).filter(Boolean) as Node[];
+        const choice = await new Promise<string | null>((resolve) => {
+          setBranchPrompt({ from: cur!, targets });
+          (window as unknown as { __branchResolve?: (v: string | null) => void }).__branchResolve = resolve;
+        });
+        setBranchPrompt(null);
+        (window as unknown as { __branchResolve?: (v: string | null) => void }).__branchResolve = undefined;
+        if (!choice) {
+          showToast({ message: "Flow cancelled at branch", color: "notice" });
+          break;
+        }
+        cur = choice;
+        continue;
+      }
+      // no auto match -> prompt among all
+      const targets = outs.map((ed) => nodes.find((n) => n.id === ed.target)).filter(Boolean) as Node[];
       const choice = await new Promise<string | null>((resolve) => {
         setBranchPrompt({ from: cur!, targets });
-        (window as unknown as { __branchResolve?: (v: string | null) => void }).__branchResolve =
-          resolve;
+        (window as unknown as { __branchResolve?: (v: string | null) => void }).__branchResolve = resolve;
       });
       setBranchPrompt(null);
-      (window as unknown as { __branchResolve?: (v: string | null) => void }).__branchResolve =
-        undefined;
+      (window as unknown as { __branchResolve?: (v: string | null) => void }).__branchResolve = undefined;
       if (!choice) {
         showToast({ message: "Flow cancelled at branch", color: "notice" });
         break;
@@ -399,6 +621,7 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
       cur = choice;
     }
     setFlowRunning(false);
+    cancelRef.current = false;
   };
 
   const deleteNode = (id: string) => {
@@ -464,6 +687,58 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
         <span className="text-[11px] text-text-subtle hidden sm:inline">
           {selectedId ? `selected: ${nodes.find((n) => n.id === selectedId)?.data.name ?? selectedId}` : "no selection"}
         </span>
+        {(running || flowRunning) && (
+          <button
+            type="button"
+            onClick={cancelRun}
+            className="px-2 h-7 text-xs bg-danger text-white rounded hover:bg-danger/90"
+            title="Cancel run"
+          >
+            ■ Cancel
+          </button>
+        )}
+        <button type="button" onClick={fitView} className="px-2 h-7 text-xs border border-border-subtle rounded hover:bg-surface-highlight" title="Fit all nodes in view">Fit</button>
+        <button type="button" onClick={clearStatus} className="px-2 h-7 text-xs border border-border-subtle rounded hover:bg-surface-highlight" title="Clear status colors">Clear</button>
+        <button type="button" onClick={() => {
+          const data = JSON.stringify({ nodes, edges }, null, 2);
+          const blob = new Blob([data], { type: "application/json" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url; a.download = `node-space-${wsId}.json`; a.click();
+          URL.revokeObjectURL(url);
+        }} className="px-2 h-7 text-xs border border-border-subtle rounded hover:bg-surface-highlight" title="Export flow JSON">Export</button>
+        <label className="px-2 h-7 text-xs border border-border-subtle rounded hover:bg-surface-highlight grid place-items-center cursor-pointer" title="Import flow JSON">
+          Import
+          <input type="file" accept=".json" className="hidden" onChange={(e) => {
+            const f = e.target.files?.[0]; if (!f) return;
+            const r = new FileReader();
+            r.onload = () => {
+              try {
+                const j = JSON.parse(String(r.result));
+                if (Array.isArray(j.nodes) && Array.isArray(j.edges)) {
+                  let inNodes: Node[] = j.nodes;
+                  // enforce no-overlap on import if enabled
+                  if (settings.layout.noOverlap) {
+                    const gap = settings.layout.gap;
+                    const fixed: Node[] = [];
+                    for (const n of inNodes as Node[]) {
+                      const w = (n as Node).w ?? NODE_MIN_W;
+                      const h = (n as Node).h ?? NODE_MIN_H;
+                      const free = findFreePosition((n as Node).x, (n as Node).y, w, h, fixed, gap);
+                      fixed.push({ ...(n as Node), x: free.x, y: free.y });
+                    }
+                    inNodes = fixed;
+                  }
+                  setNodes(inNodes); setEdges(j.edges); save(inNodes, j.edges);
+                  showToast({ message: `Imported ${inNodes.length} nodes`, color: "success" });
+                  setTimeout(fitView, 100);
+                } else showToast({ message: "Invalid flow file", color: "danger" });
+              } catch { showToast({ message: "Invalid JSON", color: "danger" }); }
+            };
+            r.readAsText(f);
+            e.target.value = "";
+          }} />
+        </label>
         <button
           data-settings-button
           type="button"
@@ -515,6 +790,8 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
               ["run", "Run"],
               ["runFlow", "Run Flow from here"],
               ["del", "Delete Node"],
+              ["resize", "Resize (drag edge)"],
+              ["duplicate", "Duplicate (Ctrl+C/V)"],
             ] as const
           ).map(([k, label]) => (
             <label key={k} className="flex items-center gap-2 py-0.5 cursor-pointer text-xs">
@@ -532,6 +809,47 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
             <input type="checkbox" checked={settings.edge.del} onChange={(e) => setSettings((s) => ({ ...s, edge: { ...s.edge, del: e.target.checked } }))} />
             <span>Delete Connection</span>
           </label>
+          <div className="h-px bg-border-subtle my-2" />
+          <div className="text-xs font-semibold text-text-subtle mb-1">Layout</div>
+          <label className="flex items-center gap-2 py-0.5 cursor-pointer text-xs">
+            <input type="checkbox" checked={settings.layout.noOverlap} onChange={(e) => setSettings((s) => ({ ...s, layout: { ...s.layout, noOverlap: e.target.checked } }))} />
+            <span>Prevent overlap</span>
+          </label>
+          <label className="flex items-center gap-2 py-0.5 text-xs">
+            <span>Gap</span>
+            <input type="number" min={0} max={50} step={1} value={settings.layout.gap} onChange={(e) => setSettings((s) => ({ ...s, layout: { ...s.layout, gap: Math.max(0, Math.min(50, parseInt(e.target.value) || 0)) } }))} className="w-14 px-1 py-0.5 border border-border-subtle rounded bg-surface text-xs" />
+            <span>px</span>
+          </label>
+          <button
+            type="button"
+            onClick={() => {
+              // ponytail: naive de-overlap in order; upgrade to force layout if needed
+              const gap = settings.layout.gap;
+              let next = [...nodes];
+              let changed = false;
+              for (let i = 0; i < next.length; i++) {
+                const n = next[i]!;
+                const w = n.w ?? NODE_MIN_W;
+                const h = n.h ?? NODE_MIN_H;
+                const others = next.slice(0, i);
+                if (wouldOverlap(n.id, n.x, n.y, w, h, others, gap)) {
+                  const free = findFreePosition(n.x, n.y, w, h, others, gap);
+                  if (free.x !== n.x || free.y !== n.y) {
+                    next[i] = { ...n, x: free.x, y: free.y };
+                    changed = true;
+                  }
+                }
+              }
+              if (changed) {
+                setNodes(next);
+                save(next, edges);
+                showToast({ message: "De-overlapped nodes", color: "success" });
+              } else showToast({ message: "No overlap found", color: "notice" });
+            }}
+            className="mt-1 w-full px-2 py-1 rounded border border-border-subtle hover:bg-surface-highlight text-xs"
+          >
+            De-overlap nodes
+          </button>
         </div>
         )}
       </div>
@@ -615,11 +933,13 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
               const s = nodes.find((n) => n.id === e.source);
               const t = nodes.find((n) => n.id === e.target);
               if (!s || !t) return null;
-              const x1 = s.x + 140,
-                y1 = s.y + 22,
+              const x1 = s.x + (s.w ?? NODE_MIN_W),
+                y1 = s.y + (s.h ?? NODE_MIN_H) / 2,
                 x2 = t.x,
-                y2 = t.y + 22;
+                y2 = t.y + (t.h ?? NODE_MIN_H) / 2;
               const sel = selectedEdgeId === e.id;
+              const midX = (x1 + x2) / 2;
+              const midY = (y1 + y2) / 2;
               return (
                 <g
                   key={e.id}
@@ -640,6 +960,12 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
                     strokeWidth={sel ? 2.2 : 1.4}
                     opacity={sel ? 1 : 0.9}
                   />
+                  {e.condition && e.condition !== "manual" && (
+                    <g>
+                      <rect x={midX - 18} y={midY - 8} width={36} height={14} rx={7} fill="var(--color-surface)" stroke={sel ? "var(--color-primary)" : "var(--color-border-subtle)"} strokeWidth={1} />
+                      <text x={midX} y={midY + 3} textAnchor="middle" fontSize={8} fontWeight={600} fill="var(--color-text)">{e.condition}</text>
+                    </g>
+                  )}
                 </g>
               );
             })}
@@ -657,13 +983,17 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
 
           {nodes.map((n) => {
             const idx = branchPrompt?.targets.findIndex((t) => t.id === n.id) ?? -1;
-            void statusById;
             return (
               <FlowNode
                 key={n.id}
                 node={n}
                 selected={selectedId === n.id}
                 branchIdx={idx}
+                status={statusById[n.id]}
+                elapsedMs={elapsedById[n.id]}
+                allowResize={settings.node.resize}
+                noOverlap={settings.layout.noOverlap}
+                gap={settings.layout.gap}
                 running={running || flowRunning}
                 canvasRef={canvasRef}
                 drag={drag}
@@ -736,6 +1066,7 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
           >
             ⟲
           </button>
+          <button type="button" onClick={fitView} className="px-2 h-7 grid place-items-center rounded hover:bg-surface-highlight text-xs" title="Fit all nodes">Fit</button>
         </div>
         {/* minimap */}
         {settings.minimap && (
@@ -746,8 +1077,8 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
                 const s = nodes.find((n) => n.id === e.source);
                 const t = nodes.find((n) => n.id === e.target);
                 if (!s || !t) return null;
-                const a = mini.toMini(s.x + 140, s.y + 22);
-                const b = mini.toMini(t.x, t.y + 22);
+                const a = mini.toMini(s.x + (s.w ?? NODE_MIN_W), s.y + (s.h ?? NODE_MIN_H) / 2);
+                const b = mini.toMini(t.x, t.y + (t.h ?? NODE_MIN_H) / 2);
                 const dx = Math.abs(b.x - a.x) * 0.5;
                 return (
                   <path
@@ -768,7 +1099,7 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
                 <div
                   key={n.id}
                   className={`absolute rounded-[2px] border ${isSel ? "bg-primary/20 border-primary" : "bg-surface border-border"}`}
-                  style={{ left: p.x, top: p.y, width: 140 * mini.scale, height: 28 * mini.scale }}
+                  style={{ left: p.x, top: p.y, width: (n.w ?? NODE_MIN_W) * mini.scale, height: (n.h ?? NODE_MIN_H) * mini.scale }}
                 />
               );
             })}
@@ -824,6 +1155,18 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
                     }}
                   >
                     ⤳ Run Flow from here
+                  </button>
+                )}
+                {settings.node.duplicate && (
+                  <button
+                    className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight"
+                    onClick={() => {
+                      const id = menu.id!;
+                      setMenu(null);
+                      void duplicateRequestAndAddNode(id);
+                    }}
+                  >
+                    ⎘ Duplicate (Ctrl+C / V)
                   </button>
                 )}
                 {(settings.node.run || settings.node.runFlow) && settings.node.del && <div className="h-px bg-border-subtle my-1" />}
@@ -897,16 +1240,23 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
                         activeRequest &&
                         (activeRequest as unknown as { model: string }).model === "http_request"
                       ) {
-                        addNode(
-                          activeRequest as unknown as {
-                            id: string;
-                            name: string;
-                            method: string;
-                            url: string;
-                          },
-                          menu.cx,
-                          menu.cy,
-                        );
+                        {
+                          let fx = menu.cx, fy = menu.cy;
+                          if (settings.layout.noOverlap) {
+                            const free = findFreePosition(fx, fy, NODE_MIN_W, NODE_MIN_H, nodes, settings.layout.gap);
+                            fx = free.x; fy = free.y;
+                          }
+                          addNode(
+                            activeRequest as unknown as {
+                              id: string;
+                              name: string;
+                              method: string;
+                              url: string;
+                            },
+                            fx,
+                            fy,
+                          );
+                        }
                       }
                       setMenu(null);
                     }}
@@ -1028,6 +1378,86 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
           </div>
         )}
 
+        {selectedId && (() => {
+          const sel = nodes.find((n) => n.id === selectedId);
+          if (!sel) return null;
+          const update = (patch: Partial<typeof sel.data>) => {
+            setNodes((prev) => {
+              const next = prev.map((p) => (p.id === selectedId ? { ...p, data: { ...p.data, ...patch } } : p));
+              saveSoon(next, edges);
+              return next;
+            });
+          };
+          return (
+            <div className="shrink-0 border-t border-border-subtle bg-surface px-3 py-2 flex flex-wrap items-center gap-3 text-xs">
+              <span className="font-semibold truncate max-w-[160px]">{sel.data.name}</span>
+              <span className="text-text-subtle">{sel.data.method}</span>
+              {statusById[sel.id] && <span className={`px-1.5 py-0.5 rounded text-[10px] ${statusById[sel.id] === "ok" ? "bg-success/20 text-success" : statusById[sel.id] === "err" ? "bg-danger/20 text-danger" : "bg-warning/20 text-warning"}`}>{statusById[sel.id]}{elapsedById[sel.id] ? ` ${elapsedById[sel.id]}ms` : ""}</span>}
+              <div className="h-4 w-px bg-border-subtle" />
+              <label className="flex items-center gap-1">
+                Delay
+                <input type="number" min={0} max={10000} step={100} value={sel.data.delayMs ?? 0} onChange={(e) => update({ delayMs: Math.max(0, parseInt(e.target.value) || 0) || undefined })} className="w-16 px-1 py-0.5 border border-border-subtle rounded bg-surface text-xs" />
+                ms
+              </label>
+              <label className="flex items-center gap-1">
+                Retry
+                <input type="number" min={0} max={5} value={sel.data.retry ?? 0} onChange={(e) => update({ retry: Math.max(0, Math.min(5, parseInt(e.target.value) || 0)) || undefined })} className="w-12 px-1 py-0.5 border border-border-subtle rounded bg-surface text-xs" />
+              </label>
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input type="checkbox" checked={!!sel.data.continueOnError} onChange={(e) => update({ continueOnError: e.target.checked || undefined })} />
+                Continue on error
+              </label>
+              <div className="flex-1" />
+              {settings.node.duplicate && <button type="button" onClick={() => void duplicateRequestAndAddNode(sel.id)} className="px-2 py-1 rounded border border-border-subtle text-xs" title="Duplicate request + node (Ctrl+C / Ctrl+V)">⎘ Dup</button>}
+              <button type="button" onClick={() => runSingle(sel.id)} disabled={running || flowRunning} className="px-2 py-1 rounded bg-primary text-white text-xs disabled:opacity-50">▶ Run</button>
+              <button type="button" onClick={() => runFlow(sel.id)} disabled={running || flowRunning} className="px-2 py-1 rounded border border-border-subtle text-xs disabled:opacity-50">⤳ Flow</button>
+            </div>
+          );
+        })()}
+        {selectedEdgeId && (() => {
+          const ed = edges.find((e) => e.id === selectedEdgeId);
+          if (!ed) return null;
+          const srcName = nodes.find((n) => n.id === ed.source)?.data.name ?? ed.source;
+          const dstName = nodes.find((n) => n.id === ed.target)?.data.name ?? ed.target;
+          const update = (condition?: string) => {
+            setEdges((prev) => {
+              const next = prev.map((p) => (p.id === selectedEdgeId ? { ...p, condition: condition || undefined } : p));
+              setNodes((pn) => {
+                saveSoon(pn, next);
+                return pn;
+              });
+              return next;
+            });
+          };
+          return (
+            <div className="shrink-0 border-t border-border-subtle bg-surface px-3 py-2 flex flex-wrap items-center gap-3 text-xs">
+              <span className="font-semibold">{srcName} → {dstName}</span>
+              <span className={`px-1.5 py-0.5 rounded text-[10px] ${selectedEdgeId ? "bg-primary/10 text-primary" : ""}`}>connection</span>
+              <div className="h-4 w-px bg-border-subtle" />
+              <label className="flex items-center gap-1">
+                Condition
+                <select value={ed.condition ?? "manual"} onChange={(e) => update(e.target.value === "manual" ? undefined : e.target.value)} className="px-1 py-0.5 border border-border-subtle rounded bg-surface text-xs">
+                  <option value="manual">Manual (prompt)</option>
+                  <option value="always">Always</option>
+                  <option value="ok">OK (2xx/3xx)</option>
+                  <option value="error">Error (4xx/5xx)</option>
+                  <option value="2xx">2xx</option>
+                  <option value="3xx">3xx</option>
+                  <option value="4xx">4xx</option>
+                  <option value="5xx">5xx</option>
+                  <option value="200">200</option>
+                  <option value="201">201</option>
+                  <option value="400">400</option>
+                  <option value="404">404</option>
+                  <option value="500">500</option>
+                </select>
+              </label>
+              <span className="text-text-subtle">auto-picks branch when status matches</span>
+              <div className="flex-1" />
+              <button type="button" onClick={() => deleteEdge(ed.id)} className="px-2 py-1 rounded bg-danger text-white text-xs">✕ Delete</button>
+            </div>
+          );
+        })()}
         <BranchPrompt
           branchPrompt={branchPrompt}
           branchPos={branchPos}
