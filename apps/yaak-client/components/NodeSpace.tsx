@@ -418,6 +418,7 @@ export function NodeSpace({ style, fullHeight }: { style?: React.CSSProperties; 
               style={{ left: n.x, top: n.y }}
               className={`absolute min-w-[140px] px-3 py-2 rounded-lg border bg-surface shadow-sm flex flex-col cursor-move select-none node ${selectedId === n.id ? "border-primary ring-1 ring-primary" : "border-border"}`}
             >
+              {branchPrompt && (() => { const idx = branchPrompt.targets.findIndex((t) => t.id === n.id); return idx >= 0 ? (<div className="absolute -top-3 -left-3 w-7 h-7 rounded-full bg-primary text-white grid place-items-center text-xs font-bold shadow border-2 border-white z-10">{idx + 1}</div>) : null; })()}
               <div className="text-xs font-semibold truncate max-w-[140px]">{n.data.name || n.data.url}</div>
               <div className="text-[10px] text-text-subtle truncate max-w-[140px]">{n.data.method} {n.data.url.slice(0, 28)}</div>
               {selectedId === n.id && (
@@ -514,7 +515,7 @@ export function NodeSpace({ style, fullHeight }: { style?: React.CSSProperties; 
               <div className="text-sm font-semibold mb-1">Branch: {nodes.find((n) => n.id === branchPrompt.from)?.data.name ?? branchPrompt.from} → ?</div>
               <div className="text-xs text-text-subtle mb-3">Select which way to continue flow</div>
               <div className="flex flex-col gap-2">
-                {branchPrompt.targets.map((t) => (
+                {branchPrompt.targets.map((t, i) => (
                   <Button
                     key={t.id}
                     size="sm"
@@ -522,7 +523,9 @@ export function NodeSpace({ style, fullHeight }: { style?: React.CSSProperties; 
                     className="justify-start"
                     onClick={() => (window as any).__branchResolve?.(t.id)}
                   >
+                    <span className="w-6 h-6 rounded-full bg-primary text-white grid place-items-center text-xs font-bold mr-2 shrink-0">{i + 1}</span>
                     <span className="text-xs font-mono bg-surface-highlight px-1 rounded mr-2">{t.data.method}</span> {t.data.name || t.data.url}
+                    <span className="ml-auto text-xs text-text-subtle">#{i + 1}</span>
                   </Button>
                 ))}
               </div>
