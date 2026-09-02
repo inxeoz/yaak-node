@@ -1,0 +1,196 @@
+<!doctype html>
+<html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>API Flow</title>
+<style>
+*{box-sizing:border-box;font-family:ui-sans,system-ui,sans-serif}
+html,body{height:100%;margin:0;background:#f7f8fa;color:#111}
+.bar{height:40px;display:flex;align-items:center;gap:8px;padding:0 10px;border-bottom:1px solid #ddd;background:#fff}
+.btn{padding:6px 10px;border:1px solid #ccc;background:#fff;border-radius:6px;cursor:pointer}
+.btn.primary{background:#111;color:#fff;border-color:#111}
+.layout{display:grid;grid-template-columns:250px 1fr;height:calc(100% - 40px)}
+.left{border-right:1px solid #ddd;background:#fff;overflow:auto;padding:8px}
+.api{padding:8px 10px;border:1px solid #ddd;border-radius:8px;margin-bottom:8px;background:#fff;cursor:grab;user-select:none}
+.api:active{cursor:grabbing}
+.api small{color:#666}
+.canvas{position:relative;overflow:hidden;background:#fefefe;background-image:linear-gradient(#eef 1px, transparent 1px), linear-gradient(90deg, #eef 1px, transparent 1px);background-size:20px 20px}
+.node{position:absolute;min-width:90px;min-height:44px;padding:8px 10px;border:1px solid #222;border-radius:8px;background:#fff;cursor:move;box-shadow:0 1px 6px rgba(0,0,0,.08);display:flex;flex-direction:column;gap:4px}
+.node .title{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px}
+.node .sub{font-size:10px;color:#666}
+.handle{width:10px;height:10px;border-radius:50%;background:#111;position:absolute;top:50%;transform:translateY(-50%);border:2px solid #fff;box-shadow:0 0 0 1px #111}
+.handle.in{left:-5px} .handle.out{right:-5px}
+svg.wires{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+path.wire{fill:none;stroke:#222;stroke-width:1.6}
+path.wire.temp{stroke-dasharray:6 4;opacity:.6}
+.hint{position:absolute;bottom:10px;right:10px;background:#111;color:#fff;padding:6px 8px;border-radius:6px;font-size:11px;opacity:.85}
+</style></head><body>
+<div class="bar">
+  <strong style="font-size:13px">API Flow</strong>
+  <span style="flex:1"></span>
+  <button class="btn" id="btnSave">Save</button>
+  <button class="btn primary" id="btnRun">Run</button>
+  <button class="btn" id="btnClear">Clear</button>
+</div>
+<div class="layout">
+  <div class="left" id="left"><div style="font-size:12px;color:#666;padding:6px">Loading APIs...</div></div>
+  <div class="canvas" id="canvas"><svg class="wires" id="wires"></svg><div class="hint">Drag API -> drop on canvas | handle -> handle to connect | drag node to move</div></div>
+</div>
+<pre id="log" style="position:absolute;left:260px;bottom:44px;max-width:60%;max-height:30%;overflow:auto;background:#fff;border:1px solid #ddd;padding:8px;border-radius:8px;display:none;font-size:11px"></pre>
+<script>
+const left=document.getElementById('left'), canvas=document.getElementById('canvas'), wires=document.getElementById('wires'), logEl=document.getElementById('log');
+let nodes=[], edges=[], nextId=1;
+let dragNode=null, dragOff={x:0,y:0}, pendingEdge=null;
+function uid(){return 'n'+(nextId++)}
+function svgPath(x1,y1,x2,y2){ const dx=Math.abs(x2-x1)*0.5; return `M${x1},${y1} C${x1+dx},${y1} ${x2-dx},${y2} ${x2},${y2}`; }
+function nodePos(el){ return {x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight}; }
+function renderWires(){
+  wires.innerHTML='';
+  for(const e of edges){
+    const s=document.querySelector(`[data-id="${e.source}"]`), t=document.querySelector(`[data-id="${e.target}"]`);
+    if(!s||!t) continue;
+    const sp=nodePos(s), tp=nodePos(t);
+    const x1=sp.x+sp.w, y1=sp.y+sp.h/2, x2=tp.x, y2=tp.y+tp.h/2;
+    const p=document.createElementNS('http://www.w3.org/2000/svg','path');
+    p.setAttribute('d', svgPath(x1,y1,x2,y2)); p.setAttribute('class','wire');
+    wires.appendChild(p);
+  }
+  if(pendingEdge){
+    const p=document.createElementNS('http://www.w3.org/2000/svg','path');
+    p.setAttribute('d', svgPath(pendingEdge.x1,pendingEdge.y1,pendingEdge.x2,pendingEdge.y2));
+    p.setAttribute('class','wire temp'); wires.appendChild(p);
+  }
+}
+function makeNode(data, x=80, y=80){
+  const id=uid();
+  const el=document.createElement('div'); el.className='node'; el.dataset.id=id;
+  el.style.left=x+'px'; el.style.top=y+'px';
+  el.innerHTML=`<span class="title">${data.name||data.url||data.id}</span><span class="sub">${data.method||''} ${(data.url||'').slice(0,24)}</span><div class="handle in" data-handle="in"></div><div class="handle out" data-handle="out"></div><span style="position:absolute;top:-6px;right:-6px;cursor:pointer;background:#fff;border:1px solid #ccc;border-radius:50%;width:16px;height:16px;display:grid;place-items:center;font-size:10px" data-del>X</span>`;
+  el.querySelector('[data-del]').onclick=()=>{ el.remove(); nodes=nodes.filter(n=>n.id!==id); edges=edges.filter(e=>e.source!==id&&e.target!==id); renderWires(); };
+  el.addEventListener('pointerdown', (e)=>{
+    if(e.target.closest('.handle')) return;
+    if(e.target.closest('[data-del]')) return;
+    dragNode=el; dragOff={x:e.clientX-el.offsetLeft, y:e.clientY-el.offsetTop};
+    el.setPointerCapture(e.pointerId);
+  });
+  el.addEventListener('pointermove', (e)=>{
+    if(dragNode!==el) return;
+    const crect=canvas.getBoundingClientRect();
+    el.style.left=(e.clientX-crect.left-dragOff.x+canvas.scrollLeft)+'px';
+    el.style.top=(e.clientY-crect.top-40-dragOff.y+canvas.scrollTop)+'px';
+    renderWires();
+  });
+  el.addEventListener('pointerup', ()=>{ dragNode=null; saveSoon(); });
+  el.querySelector('.handle.out').addEventListener('pointerdown', (e)=>{
+    e.stopPropagation();
+    const sp=nodePos(el); pendingEdge={source:id, x1:sp.x+sp.w, y1:sp.y+sp.h/2, x2:sp.x+sp.w, y2:sp.y+sp.h/2};
+    const move=(ev)=>{
+      const crect=canvas.getBoundingClientRect();
+      pendingEdge.x2=ev.clientX-crect.left; pendingEdge.y2=ev.clientY-crect.top; renderWires();
+    };
+    const up=(ev)=>{
+      document.removeEventListener('pointermove',move); document.removeEventListener('pointerup',up);
+      const target=document.elementFromPoint(ev.clientX, ev.clientY)?.closest('.node');
+      if(target && target.dataset.id!==id){
+        const tid=target.dataset.id;
+        if(!edges.some(e=>e.source===id&&e.target===tid)) edges.push({id:'e'+Date.now()+Math.random(), source:id, target:tid});
+      }
+      pendingEdge=null; renderWires(); saveSoon();
+    };
+    document.addEventListener('pointermove',move); document.addEventListener('pointerup',up);
+  });
+  nodes.push({id, data});
+  canvas.appendChild(el); renderWires(); return id;
+}
+async function loadApis(){
+  try{
+    const r=await fetch('/requests'); const j=await r.json();
+    const reqs=j.requests||[];
+    left.innerHTML='';
+    if(!reqs.length) left.innerHTML='<div style="font-size:12px;color:#888">No APIs yet - create requests in Yaak first</div>';
+    for(const req of reqs){
+      const div=document.createElement('div'); div.className='api'; div.draggable=true;
+      div.innerHTML=`<div style="font-weight:600;font-size:12px">${req.name||'(unnamed)'}</div><small>${req.method||'GET'} ${req.url||''}</small>`;
+      div.addEventListener('dragstart', (e)=>{ e.dataTransfer.setData('application/json', JSON.stringify(req)); e.dataTransfer.effectAllowed='copy'; });
+      div.addEventListener('click', ()=> makeNode(req, 120+Math.random()*200, 80+Math.random()*200));
+      left.appendChild(div);
+    }
+  }catch(e){ left.innerHTML='<div style="color:#c00;font-size:12px">'+e+'</div>'; }
+}
+canvas.addEventListener('dragover', e=>{ e.preventDefault(); e.dataTransfer.dropEffect='copy'; });
+canvas.addEventListener('drop', e=>{
+  e.preventDefault();
+  try{
+    const data=JSON.parse(e.dataTransfer.getData('application/json')||'null');
+    if(!data) return;
+    const rect=canvas.getBoundingClientRect();
+    const x=e.clientX-rect.left, y=e.clientY-rect.top;
+    makeNode({requestId:data.id, name:data.name, method:data.method, url:data.url}, x, y);
+    saveSoon();
+  }catch{}
+});
+function snapshot(){ return {nodes: nodes.map(n=>{
+  const el=document.querySelector(`[data-id="${n.id}"]`);
+  const p=el? {x:el.offsetLeft,y:el.offsetTop}:{x:0,y:0};
+  return {id:n.id, x:p.x, y:p.y, data:n.data};
+}), edges};}
+async function save(){
+  const g=snapshot();
+  await fetch('/store',{method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({graph:g})});
+}
+let saveT=null; function saveSoon(){ clearTimeout(saveT); saveT=setTimeout(save,400); }
+async function restore(){
+  try{
+    const r=await fetch('/store'); const j=await r.json();
+    const g=j.graph; if(!g) return;
+    nodes=[]; edges=g.edges||[];
+    document.querySelectorAll('.node').forEach(el=>el.remove());
+    for(const n of g.nodes||[]){
+      const id=n.id; const el=document.createElement('div'); el.className='node'; el.dataset.id=id;
+      el.style.left=(n.x||80)+'px'; el.style.top=(n.y||80)+'px';
+      const d=n.data||{};
+      el.innerHTML=`<span class="title">${d.name||d.url||d.requestId}</span><span class="sub">${d.method||''} ${(d.url||'').slice(0,24)}</span><div class="handle in"></div><div class="handle out"></div><span style="position:absolute;top:-6px;right:-6px;cursor:pointer;background:#fff;border:1px solid #ccc;border-radius:50%;width:16px;height:16px;display:grid;place-items:center;font-size:10px" data-del>X</span>`;
+      el.querySelector('[data-del]').onclick=()=>{ el.remove(); nodes=nodes.filter(x=>x.id!==id); edges=edges.filter(e=>e.source!==id&&e.target!==id); renderWires(); };
+      el.addEventListener('pointerdown', (e)=>{
+        if(e.target.closest('.handle')||e.target.closest('[data-del]')) return;
+        dragNode=el; dragOff={x:e.clientX-el.offsetLeft, y:e.clientY-el.offsetTop}; el.setPointerCapture(e.pointerId);
+      });
+      el.addEventListener('pointermove', (e)=>{
+        if(dragNode!==el) return;
+        const crect=canvas.getBoundingClientRect();
+        el.style.left=(e.clientX-crect.left-dragOff.x+canvas.scrollLeft)+'px';
+        el.style.top=(e.clientY-crect.top-40-dragOff.y+canvas.scrollTop)+'px';
+        renderWires();
+      });
+      el.addEventListener('pointerup', ()=>{ dragNode=null; saveSoon(); });
+      el.querySelector('.handle.out').addEventListener('pointerdown', (e)=>{
+        e.stopPropagation();
+        const sp=nodePos(el); pendingEdge={source:id, x1:sp.x+sp.w, y1:sp.y+sp.h/2, x2:sp.x+sp.w, y2:sp.y+sp.h/2};
+        const move=(ev)=>{ const crect=canvas.getBoundingClientRect(); pendingEdge.x2=ev.clientX-crect.left; pendingEdge.y2=ev.clientY-crect.top; renderWires(); };
+        const up=(ev)=>{
+          document.removeEventListener('pointermove',move); document.removeEventListener('pointerup',up);
+          const target=document.elementFromPoint(ev.clientX, ev.clientY)?.closest('.node');
+          if(target && target.dataset.id!==id){
+            const tid=target.dataset.id;
+            if(!edges.some(e=>e.source===id&&e.target===tid)) edges.push({id:'e'+Date.now()+Math.random(), source:id, target:tid});
+          }
+          pendingEdge=null; renderWires(); saveSoon();
+        };
+        document.addEventListener('pointermove',move); document.addEventListener('pointerup',up);
+      });
+      nodes.push({id, data:d}); canvas.appendChild(el);
+      const num=parseInt(id.slice(1),10); if(num>=nextId) nextId=num+1;
+    }
+    renderWires();
+  }catch(e){ console.error(e); }
+}
+document.getElementById('btnSave').onclick=async()=>{ await save(); logEl.style.display='block'; logEl.textContent='Saved.'; setTimeout(()=>logEl.style.display='none',1000); };
+document.getElementById('btnClear').onclick=()=>{ nodes=[]; edges=[]; document.querySelectorAll('.node').forEach(el=>el.remove()); renderWires(); saveSoon(); };
+document.getElementById('btnRun').onclick=async()=>{
+  const g=snapshot();
+  logEl.style.display='block'; logEl.textContent='Running...';
+  const r=await fetch('/run',{method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({graph:g})});
+  const j=await r.json();
+  logEl.textContent=JSON.stringify(j, null, 2);
+};
+loadApis().then(restore);
+window.addEventListener('resize', renderWires);
+</script></body></html>

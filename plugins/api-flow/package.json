@@ -1,0 +1,16 @@
+{
+  "name": "@yaak/api-flow",
+  "displayName": "API Flow (Nodes)",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Drag APIs onto a canvas and connect them - node-style flow",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mountain-loop/yaak.git",
+    "directory": "plugins/api-flow"
+  },
+  "scripts": {
+    "build": "yaakcli build",
+    "dev": "yaakcli dev"
+  }
+}

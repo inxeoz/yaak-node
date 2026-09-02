@@ -42,8 +42,12 @@ import { GrpcConnectionLayout } from "./GrpcConnectionLayout";
 import { HttpRequestLayout } from "./HttpRequestLayout";
 import Sidebar from "./Sidebar";
 import { SidebarActions } from "./SidebarActions";
+import { NodeSpace } from "./NodeSpace";
 import { WebsocketRequestLayout } from "./WebsocketRequestLayout";
 import { WorkspaceHeader } from "./WorkspaceHeader";
+import { nodeSpaceAtom, workspaceLayoutAtom } from "../lib/atoms";
+import { SplitLayout } from "@yaakapp-internal/ui";
+import { HttpResponsePane } from "./HttpResponsePane";
 
 const body = { gridArea: "body" };
 
@@ -152,6 +156,11 @@ function WorkspaceBody() {
   const activeRequest = useAtomValue(activeRequestAtom);
   const activeFolder = useAtomValue(activeFolderAtom);
   const activeWorkspace = useAtomValue(activeWorkspaceAtom);
+  const nodeSpace = useAtomValue(nodeSpaceAtom);
+
+  if (nodeSpace) {
+    return <NodeSpaceLayout style={body} />;
+  }
 
   if (activeWorkspace == null) {
     return (
@@ -198,6 +207,34 @@ function WorkspaceBody() {
           </CreateDropdown>
         </HStack>
       }
+    />
+  );
+}
+
+
+function NodeSpaceLayout({ style }: { style: React.CSSProperties }) {
+  const activeRequest = useAtomValue(activeRequestAtom);
+  const activeWorkspace = useAtomValue(activeWorkspaceAtom);
+  const workspaceLayout = useAtomValue(workspaceLayoutAtom);
+  const wsId = activeWorkspace?.id ?? "n/a";
+
+  // If no active http request, just show full NodeSpace (response pane empty would be wasted)
+  if (activeRequest?.model !== "http_request") {
+    return <NodeSpace style={style} />;
+  }
+
+  return (
+    <SplitLayout
+      storageKey={`node_space_layout::${wsId}`}
+      className="p-3 gap-1.5"
+      style={style}
+      layout={workspaceLayout}
+      firstSlot={({ style: slotStyle, orientation }) => (
+        <NodeSpace style={slotStyle} fullHeight={orientation === "horizontal"} />
+      )}
+      secondSlot={({ style: slotStyle }) => (
+        <HttpResponsePane activeRequestId={activeRequest.id} style={slotStyle} />
+      )}
     />
   );
 }

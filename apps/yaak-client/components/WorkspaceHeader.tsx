@@ -4,7 +4,7 @@ import { useAtom, useAtomValue } from "jotai";
 import { memo } from "react";
 import { activeWorkspaceAtom, activeWorkspaceMetaAtom } from "../hooks/useActiveWorkspace";
 import { useToggleCommandPalette } from "../hooks/useToggleCommandPalette";
-import { workspaceLayoutAtom } from "../lib/atoms";
+import { nodeSpaceAtom, workspaceLayoutAtom } from "../lib/atoms";
 import { setupOrConfigureEncryption } from "../lib/setupOrConfigureEncryption";
 import { CookieDropdown } from "./CookieDropdown";
 import { IconButton } from "./core/IconButton";
@@ -28,6 +28,9 @@ export const WorkspaceHeader = memo(function WorkspaceHeader({
 }: Props) {
   const togglePalette = useToggleCommandPalette();
   const [workspaceLayout, setWorkspaceLayout] = useAtom(workspaceLayoutAtom);
+  const [nodeSpace, setNodeSpace] = useAtom(nodeSpaceAtom);
+  // expose to TreeItem for native drag fallback
+  if (typeof window !== "undefined") (window as any).__yaakNodeSpace = nodeSpace;
   const workspace = useAtomValue(activeWorkspaceAtom);
   const workspaceMeta = useAtomValue(activeWorkspaceMetaAtom);
   const showEncryptionSetup =
@@ -64,6 +67,20 @@ export const WorkspaceHeader = memo(function WorkspaceHeader({
         ) : (
           <LicenseBadge />
         )}
+        <IconButton
+          icon="merge"
+          title="Toggle Node Space"
+          size="sm"
+          iconColor="secondary"
+          onClick={() => setNodeSpace((v) => !v)}
+        />
+        <span
+          onClick={() => setNodeSpace((v) => !v)}
+          className={`hidden sm:inline text-xs px-2 py-1 rounded border cursor-pointer select-none ${nodeSpace ? "bg-primary text-white border-primary" : "bg-surface border-border-subtle text-text-subtle"}`}
+          title="Switch between Request and Node Space"
+        >
+          {nodeSpace ? "Node Space" : "Request"}
+        </span>
         <IconButton
           icon={
             workspaceLayout === "responsive"

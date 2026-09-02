@@ -274,11 +274,12 @@ function TreeItem_<T extends { id: string }>({
     setShowContextMenu(null);
   }, []);
 
+  const isNodeSpace = typeof window !== "undefined" && (window as any).__yaakNodeSpace;
   const {
     attributes,
     listeners,
     setNodeRef: setDraggableRef,
-  } = useDraggable({ id: node.item.id, disabled: node.draggable === false || editing });
+  } = useDraggable({ id: node.item.id, disabled: node.draggable === false || editing || !!isNodeSpace });
 
   const { setNodeRef: setDroppableRef } = useDroppable({ id: node.item.id });
 
@@ -362,6 +363,24 @@ function TreeItem_<T extends { id: string }>({
           {...attributes}
           {...listeners}
           tabIndex={isLastSelected ? 0 : -1}
+          draggable={!editing}
+          onMouseDown={() => {
+            if (!editing) (window as any).__yaakDragId = node.item.id;
+          }}
+          onDragStart={(e) => {
+            try {
+              const payload = JSON.stringify({ id: node.item.id, model: (node.item as any).model });
+              e.dataTransfer.setData("application/json", payload);
+              e.dataTransfer.setData("text/plain", (node.item as any).name ?? node.item.id);
+              e.dataTransfer.effectAllowed = "copy";
+              e.dataTransfer.setData("application/x-yaak-id", node.item.id);
+              (window as any).__yaakDragId = node.item.id;
+              console.log("[TreeItem] dragStart", node.item.id);
+            } catch {}
+          }}
+          onDragEnd={() => {
+            setTimeout(() => { (window as any).__yaakDragId = null; }, 500);
+          }}
         >
           {ItemLeftSlotInner != null && <ItemLeftSlotInner treeId={treeId} item={node.item} />}
           {getEditOptions != null && editing ? (

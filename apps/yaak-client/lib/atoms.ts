@@ -20,3 +20,5 @@ export const workspaceLayoutAtom = atomWithKVStorage<SplitLayoutLayout>(
 );
 
 export const updateAvailableAtom = atom<Omit<UpdateInfo, "replyEventId"> | null>(null);
+
+export const nodeSpaceAtom = atomWithKVStorage<boolean>("node_space_active", false);
