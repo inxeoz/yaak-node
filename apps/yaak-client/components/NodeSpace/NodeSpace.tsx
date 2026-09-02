@@ -5,12 +5,17 @@ import { activeRequestAtom } from "../../hooks/useActiveRequest";
 import { activeWorkspaceAtom } from "../../hooks/useActiveWorkspace";
 import { sendAnyHttpRequest } from "../../hooks/useSendAnyHttpRequest";
 import { showToast } from "../../lib/toast";
-import { Button } from "../core/Button";
 import { BranchPrompt } from "./BranchPrompt";
 import { FlowNode } from "./FlowNode";
-import { svgPath, topoSort, wouldCreateCycle } from "./graph";
+import { svgPath, topoSort } from "./graph";
 import type { Node } from "./types";
 import { useNodeGraph } from "./useNodeGraph";
+
+type Menu =
+  | { x: number; y: number; cx: number; cy: number; kind: "canvas" }
+  | { x: number; y: number; cx: number; cy: number; kind: "node"; id: string }
+  | { x: number; y: number; cx: number; cy: number; kind: "edge"; id: string }
+  | null;
 
 export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?: boolean }) {
   const httpRequests = useAtomValue(httpRequestsAtom);
@@ -41,6 +46,7 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
     ox: number;
     oy: number;
   } | null>(null);
+  const [menu, setMenu] = useState<Menu>(null);
 
   useEffect(() => {
     if (branchPrompt) setBranchPos(null);
@@ -48,11 +54,24 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
 
   const [running, setRunning] = useState(false);
 
-  // debug - keep minimal, remove in prod if noisy
-  // ponytail: console logs for dev, drop if noisy
   useEffect(() => {
     // console.log("[NodeSpace] nodes", nodes.length);
   }, [nodes.length]);
+
+  // close menu on click/escape
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenu(null);
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -86,6 +105,7 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
       if (e.key === "Escape") {
         setSelectedId(null);
         setSelectedEdgeId(null);
+        setMenu(null);
       }
     };
     window.addEventListener("keydown", h);
@@ -127,7 +147,7 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
       );
     } else {
       showToast({
-        message: "Drop failed: drag an API from left sidebar or use + Add API",
+        message: "Drop failed: drag an API from left sidebar or use right-click → Add",
         color: "warning",
       });
     }
@@ -242,8 +262,57 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
     setFlowRunning(false);
   };
 
-  // toast on cycle attempt (FlowNode delegates check without toast, add here for canvas pending if needed)
-  // keep wouldCreateCycle import for future use
+  const deleteNode = (id: string) => {
+    setNodes((prev) => {
+      const next = prev.filter((n) => n.id !== id);
+      setEdges((pe) => {
+        const ne = pe.filter((e) => e.source !== id && e.target !== id);
+        save(next, ne);
+        return ne;
+      });
+      return next;
+    });
+    if (selectedId === id) setSelectedId(null);
+  };
+
+  const deleteEdge = (id: string) => {
+    setEdges((prev) => {
+      const next = prev.filter((e) => e.id !== id);
+      setNodes((pn) => {
+        saveSoon(pn, next);
+        return pn;
+      });
+      return next;
+    });
+    if (selectedEdgeId === id) setSelectedEdgeId(null);
+  };
+
+  const clearAll = () => {
+    setNodes([]);
+    setEdges([]);
+    save([], []);
+    setSelectedId(null);
+    setSelectedEdgeId(null);
+  };
+
+  const openMenu = (
+    e: React.MouseEvent,
+    kind: "canvas" | "node" | "edge",
+    id?: string,
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = canvasRef.current!.getBoundingClientRect();
+    const cx = e.clientX - rect.left;
+    const cy = e.clientY - rect.top;
+    // clamp to viewport so toolbox stays visible
+    const x = e.clientX;
+    const y = e.clientY;
+    if (kind === "node" && id) setSelectedId(id);
+    if (kind === "edge" && id) setSelectedEdgeId(id);
+    setMenu({ x, y, cx, cy, kind, id } as Menu);
+  };
+
 
   return (
     <div style={style} className="w-full h-full flex flex-col bg-surface overflow-hidden">
@@ -252,106 +321,10 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
         <span className="text-xs text-text-subtle">
           {nodes.length} nodes • {edges.length} edges
         </span>
-        <span className="hidden sm:inline text-[11px] text-text-subtle ml-2">
-          — select API in left sidebar, then Add
-        </span>
         <div className="flex-1" />
-        <select
-          id="node-add-select"
-          className="text-xs border border-border-subtle rounded px-1 py-1 bg-surface max-w-[180px]"
-          defaultValue=""
-          onChange={(e) => {
-            const id = e.target.value;
-            if (!id) return;
-            const req = httpRequests.find((r) => r.id === id);
-            if (req) addNode(req, 120 + Math.random() * 280, 80 + Math.random() * 200);
-            e.currentTarget.value = "";
-          }}
-        >
-          <option value="">+ Add API…</option>
-          {httpRequests.map((r) => (
-            <option key={r.id} value={r.id}>
-              {r.method} {r.name || r.url.slice(0, 30)}
-            </option>
-          ))}
-        </select>
-        <Button
-          size="xs"
-          variant="border"
-          disabled={
-            !activeRequest ||
-            (activeRequest as unknown as { model: string }).model !== "http_request"
-          }
-          onClick={() => {
-            if (
-              activeRequest &&
-              (activeRequest as unknown as { model: string }).model === "http_request"
-            ) {
-              addNode(
-                activeRequest as unknown as {
-                  id: string;
-                  name: string;
-                  method: string;
-                  url: string;
-                },
-                120 + Math.random() * 280,
-                80 + Math.random() * 200,
-              );
-            } else {
-              showToast({
-                message: `No active request (active=${(activeRequest as unknown as { model?: string })?.model ?? "none"})`,
-                color: "warning",
-              });
-            }
-          }}
-          title={
-            activeRequest
-              ? `Add ${(activeRequest as unknown as { name: string }).name}`
-              : "Select an API on the left then click"
-          }
-        >
-          + Add Selected
-        </Button>
-        <Button
-          size="xs"
-          variant="border"
-          onClick={() => {
-            setNodes([]);
-            setEdges([]);
-            save([], []);
-          }}
-        >
-          Clear
-        </Button>
-        <Button
-          size="xs"
-          variant="border"
-          disabled={running || flowRunning || !selectedId}
-          onClick={() => selectedId && runSingle(selectedId)}
-          title={
-            selectedId
-              ? `Run ${nodes.find((n) => n.id === selectedId)?.data.name ?? ""}`
-              : "Select a node first"
-          }
-        >
-          ▶ Run Selected
-        </Button>
-        <Button
-          size="xs"
-          variant="border"
-          disabled={running || flowRunning || !selectedId}
-          onClick={() => selectedId && runFlow(selectedId)}
-          title={
-            selectedId
-              ? `Run Flow from ${nodes.find((n) => n.id === selectedId)?.data.name ?? ""}`
-              : "Select start node"
-          }
-        >
-          ⤳ Run Flow
-        </Button>
-        <Button size="xs" color="primary" disabled={running || flowRunning} onClick={run}>
-          {running || flowRunning ? "Running…" : "▶ Run All"}
-        </Button>
+        <span className="text-[11px] text-text-subtle hidden sm:inline">
+          {selectedId ? `selected: ${nodes.find((n) => n.id === selectedId)?.data.name ?? selectedId}` : "no selection"}
+        </span>
       </div>
 
       <div className="flex-1 min-h-0 relative">
@@ -363,6 +336,7 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
               setSelectedEdgeId(null);
             }
           }}
+          onContextMenu={(e) => openMenu(e, "canvas")}
           onDragOver={(e) => {
             e.preventDefault();
             e.dataTransfer.dropEffect = "copy";
@@ -399,6 +373,7 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
                   key={e.id}
                   style={{ pointerEvents: "auto", cursor: "pointer" }}
                   onClick={() => setSelectedEdgeId(e.id)}
+                  onContextMenu={(ev) => openMenu(ev as unknown as React.MouseEvent, "edge", e.id)}
                 >
                   <path
                     d={svgPath(x1, y1, x2, y2)}
@@ -430,7 +405,7 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
 
           {nodes.map((n) => {
             const idx = branchPrompt?.targets.findIndex((t) => t.id === n.id) ?? -1;
-            void statusById; // keep statusById wired for future per-node color (was statusById[n.id])
+            void statusById;
             return (
               <FlowNode
                 key={n.id}
@@ -447,21 +422,166 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
                 setPending={setPending}
                 save={save}
                 saveSoon={saveSoon}
-                runSingle={runSingle}
                 edges={edges}
                 nodes={nodes}
+                onContextMenu={(e) => openMenu(e, "node", n.id)}
               />
             );
           })}
 
           {nodes.length === 0 && (
             <div className="absolute inset-0 grid place-items-center pointer-events-none">
-              <div className="text-sm text-text-subtle border border-dashed border-border-subtle rounded-lg px-4 py-3 bg-surface/80">
-                Drop APIs here to build a flow
+              <div className="text-sm text-text-subtle border border-dashed border-border-subtle rounded-lg px-4 py-3 bg-surface/80 text-center">
+                Drop APIs here or right-click → Add API
               </div>
             </div>
           )}
         </div>
+
+        {menu && (
+          <div
+            onClick={(e) => e.stopPropagation()}
+            onContextMenu={(e) => e.preventDefault()}
+            className="fixed z-20 min-w-[220px] max-w-[320px] bg-surface border border-border-subtle rounded-lg shadow-xl py-1 text-sm overflow-hidden"
+            style={{
+              left: Math.min(menu.x, window.innerWidth - 240),
+              top: Math.min(menu.y, window.innerHeight - 320),
+            }}
+          >
+            {menu.kind === "node" && menu.id && (
+              <>
+                <div className="px-3 py-1.5 text-xs font-semibold text-text-subtle border-b border-border-subtle truncate">
+                  {nodes.find((n) => n.id === menu.id)?.data.name || menu.id}
+                </div>
+                <button
+                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
+                  disabled={running || flowRunning}
+                  onClick={() => {
+                    setMenu(null);
+                    runSingle(menu.id!);
+                  }}
+                >
+                  ▶ Run
+                </button>
+                <button
+                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
+                  disabled={running || flowRunning}
+                  onClick={() => {
+                    setMenu(null);
+                    runFlow(menu.id!);
+                  }}
+                >
+                  ⤳ Run Flow from here
+                </button>
+                <div className="h-px bg-border-subtle my-1" />
+                <button
+                  className="w-full text-left px-3 py-1.5 hover:bg-danger/10 text-danger"
+                  onClick={() => {
+                    setMenu(null);
+                    deleteNode(menu.id!);
+                  }}
+                >
+                  ✕ Delete Node
+                </button>
+              </>
+            )}
+
+            {menu.kind === "edge" && menu.id && (
+              <>
+                <div className="px-3 py-1.5 text-xs font-semibold text-text-subtle border-b border-border-subtle">
+                  Connection
+                </div>
+                <button
+                  className="w-full text-left px-3 py-1.5 hover:bg-danger/10 text-danger"
+                  onClick={() => {
+                    setMenu(null);
+                    deleteEdge(menu.id!);
+                  }}
+                >
+                  ✕ Delete Connection
+                </button>
+              </>
+            )}
+
+            {menu.kind === "canvas" && (
+              <>
+                <div className="px-3 py-1.5 text-xs font-semibold text-text-subtle border-b border-border-subtle">
+                  Toolbox
+                </div>
+
+                <button
+                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50 disabled:cursor-not-allowed"
+                  disabled={
+                    !activeRequest ||
+                    (activeRequest as unknown as { model: string }).model !== "http_request"
+                  }
+                  onClick={() => {
+                    if (
+                      activeRequest &&
+                      (activeRequest as unknown as { model: string }).model === "http_request"
+                    ) {
+                      addNode(
+                        activeRequest as unknown as {
+                          id: string;
+                          name: string;
+                          method: string;
+                          url: string;
+                        },
+                        menu.cx,
+                        menu.cy,
+                      );
+                    }
+                    setMenu(null);
+                  }}
+                >
+                  + Add Selected here
+                </button>
+
+                <button
+                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
+                  disabled={running || flowRunning || nodes.length === 0}
+                  onClick={() => {
+                    setMenu(null);
+                    run();
+                  }}
+                >
+                  ▶ Run All
+                </button>
+                <button
+                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
+                  disabled={running || flowRunning || !selectedId}
+                  onClick={() => {
+                    setMenu(null);
+                    if (selectedId) runSingle(selectedId);
+                  }}
+                >
+                  ▶ Run Selected
+                </button>
+                <button
+                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
+                  disabled={running || flowRunning || !selectedId}
+                  onClick={() => {
+                    setMenu(null);
+                    if (selectedId) runFlow(selectedId);
+                  }}
+                >
+                  ⤳ Run Flow (selected)
+                </button>
+                <div className="h-px bg-border-subtle my-1" />
+                <button
+                  className="w-full text-left px-3 py-1.5 hover:bg-danger/10 text-danger disabled:opacity-50"
+                  disabled={nodes.length === 0 && edges.length === 0}
+                  onClick={() => {
+                    setMenu(null);
+                    clearAll();
+                  }}
+                >
+                  ✕ Clear Canvas
+                </button>
+              </>
+            )}
+          </div>
+        )}
 
         <BranchPrompt
           branchPrompt={branchPrompt}

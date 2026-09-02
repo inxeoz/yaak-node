@@ -4,7 +4,7 @@ import { wouldCreateCycle } from "./graph";
 type Props = {
   node: Node;
   selected: boolean;
-  branchIdx: number; // -1 if not in branch
+  branchIdx: number;
   running: boolean;
   canvasRef: React.RefObject<HTMLDivElement | null>;
   drag: { id: string; dx: number; dy: number } | null;
@@ -17,16 +17,15 @@ type Props = {
   >;
   save: (n: Node[], e: Edge[]) => void;
   saveSoon: (n: Node[], e: Edge[]) => void;
-  runSingle: (id: string) => void;
   edges: Edge[];
   nodes: Node[];
+  onContextMenu?: (e: React.MouseEvent) => void;
 };
 
 export function FlowNode({
   node: n,
   selected,
   branchIdx,
-  running,
   canvasRef,
   drag,
   setDrag,
@@ -34,22 +33,17 @@ export function FlowNode({
   setEdges,
   setSelectedId,
   setPending,
-  save,
   saveSoon,
-  runSingle,
   edges,
+  onContextMenu,
 }: Props) {
   return (
     <div
       data-node={n.id}
       onPointerDown={(e) => {
+        if (e.button !== 0) return;
         const target = e.target as HTMLElement;
-        if (
-          target.closest("[data-handle]") ||
-          target.closest("[data-del]") ||
-          target.closest("[data-run]")
-        )
-          return;
+        if (target.closest("[data-handle]")) return;
         const crect = canvasRef.current!.getBoundingClientRect();
         const offsetX = e.clientX - crect.left - n.x;
         const offsetY = e.clientY - crect.top - n.y;
@@ -57,6 +51,7 @@ export function FlowNode({
         (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
       }}
       onClick={() => setSelectedId(n.id)}
+      onContextMenu={onContextMenu}
       onPointerMove={(e) => {
         if (drag?.id !== n.id) return;
         const crect = canvasRef.current!.getBoundingClientRect();
@@ -87,20 +82,6 @@ export function FlowNode({
       <div className="text-[10px] text-text-subtle truncate max-w-[140px]">
         {n.data.method} {n.data.url.slice(0, 28)}
       </div>
-      {selected && (
-        <button
-          data-run
-          onClick={(e) => {
-            e.stopPropagation();
-            runSingle(n.id);
-          }}
-          disabled={running}
-          className="mt-1 text-[10px] px-2 py-0.5 rounded bg-primary text-white hover:bg-primary/90 disabled:opacity-50 self-start"
-          title="Run this node"
-        >
-          ▶ Run
-        </button>
-      )}
       <div
         data-handle="out"
         onPointerDown={(e) => {
@@ -123,7 +104,6 @@ export function FlowNode({
             if (target && target.dataset.node !== n.id) {
               const tid = target.dataset.node!;
               if (wouldCreateCycle(n.id, tid, edges)) {
-                // toast handled by caller via window? keep simple
                 setPending(null);
                 return;
               }
@@ -147,30 +127,12 @@ export function FlowNode({
           document.addEventListener("pointerup", up);
         }}
         className="absolute -right-2 top-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-text border-2 border-surface shadow cursor-crosshair flex items-center justify-center"
-        title="Drag to connect"
+        title="Drag to connect — right-click for tools"
       />
       <div
         data-handle="in"
         className="absolute -left-2 top-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-primary border-2 border-surface shadow"
       />
-      <button
-        data-del
-        onClick={() => {
-          // caller handles bulk delete; inline for speed
-          setNodes((prevNodes) => {
-            const nextNodes = prevNodes.filter((x) => x.id !== n.id);
-            setEdges((prevEdges) => {
-              const nextEdges = prevEdges.filter((e) => e.source !== n.id && e.target !== n.id);
-              save(nextNodes, nextEdges);
-              return nextEdges;
-            });
-            return nextNodes;
-          });
-        }}
-        className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-surface border border-border-subtle grid place-items-center text-[10px] hover:bg-danger hover:text-white"
-      >
-        ×
-      </button>
     </div>
   );
 }

@@ -63,26 +63,25 @@ export function BranchPrompt({
         <div className="text-xs text-text-subtle mb-3">Select which way to continue flow</div>
         <div className="flex flex-col gap-2">
           {branchPrompt.targets.map((t, i) => (
-            <Button
+            <button
               key={t.id}
-              size="sm"
-              variant="border"
-              className="justify-start"
+              type="button"
+              className="w-full flex items-center gap-2 px-3 py-2.5 rounded-md border border-border-subtle bg-surface hover:bg-surface-highlight hover:border-border text-left leading-none"
               onClick={() =>
                 (
                   window as unknown as { __branchResolve?: (v: string | null) => void }
                 ).__branchResolve?.(t.id)
               }
             >
-              <span className="w-6 h-6 rounded-full bg-primary text-white grid place-items-center text-xs font-bold mr-2 shrink-0">
+              <span className="w-6 h-6 rounded-full bg-primary text-white grid place-items-center text-xs font-bold shrink-0">
                 {i + 1}
               </span>
-              <span className="text-xs font-mono bg-surface-highlight px-1 rounded mr-2">
+              <span className="text-xs font-mono bg-surface-highlight px-1.5 py-0.5 rounded shrink-0">
                 {t.data.method}
-              </span>{" "}
-              {t.data.name || t.data.url}
-              <span className="ml-auto text-xs text-text-subtle">#{i + 1}</span>
-            </Button>
+              </span>
+              <span className="text-sm truncate flex-1">{t.data.name || t.data.url}</span>
+              <span className="text-xs text-text-subtle shrink-0">#{i + 1}</span>
+            </button>
           ))}
         </div>
         <div className="flex justify-end gap-2 mt-4">
