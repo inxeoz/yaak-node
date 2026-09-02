@@ -30,6 +30,8 @@ export function NodeSpace({ style, fullHeight }: { style?: React.CSSProperties; 
   const [pending, setPending] = useState<{ source: string; x1: number; y1: number; x2: number; y2: number } | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [statusById, setStatusById] = useState<Record<string, "ok" | "err" | "run">>({});
   const [log, setLog] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const nextId = useRef(1);
@@ -40,6 +42,32 @@ export function NodeSpace({ style, fullHeight }: { style?: React.CSSProperties; 
   useEffect(() => {
     console.log("[NodeSpace] httpRequests", httpRequests.length);
   }, [httpRequests]);
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key === "Delete" || e.key === "Backspace") {
+        if (selectedEdgeId) {
+          setEdges((prev) => {
+            const next = prev.filter((ee) => ee.id !== selectedEdgeId);
+            setNodes((pn) => { saveSoon(pn, next); return pn; });
+            return next;
+          });
+          setSelectedEdgeId(null); e.preventDefault();
+        } else if (selectedId) {
+          const id = selectedId;
+          setNodes((prev) => {
+            const next = prev.filter((n) => n.id !== id);
+            setEdges((pe) => { const ne = pe.filter((ee) => ee.source !== id && ee.target !== id); saveSoon(next, ne); return ne; });
+            return next;
+          });
+          setSelectedId(null); e.preventDefault();
+        }
+      }
+      if (e.key === "Escape") { setSelectedId(null); setSelectedEdgeId(null); }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [selectedId, selectedEdgeId]);
 
   // filtered via sidebar search
 
@@ -129,6 +157,14 @@ export function NodeSpace({ style, fullHeight }: { style?: React.CSSProperties; 
     }
   };
 
+  const wouldCreateCycle = (source: string, target: string, curEdges: Edge[]) => {
+    const adj = new Map<string, string[]>();
+    for (const e of [...curEdges, { id: "tmp", source, target }]) { const a = adj.get(e.source) ?? []; a.push(e.target); adj.set(e.source, a); }
+    const stack = [target]; const seen = new Set<string>();
+    while (stack.length) { const cur = stack.pop()!; if (cur === source) return true; if (seen.has(cur)) continue; seen.add(cur); for (const nxt of adj.get(cur) ?? []) stack.push(nxt); }
+    return false;
+  };
+
   const svgPath = (x1: number, y1: number, x2: number, y2: number) => {
     const dx = Math.abs(x2 - x1) * 0.5;
     return `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
@@ -170,10 +206,13 @@ export function NodeSpace({ style, fullHeight }: { style?: React.CSSProperties; 
     for (const nid of order) {
       const node = nodes.find((n) => n.id === nid);
       if (!node) continue;
+      setStatusById((m) => ({ ...m, [nid]: "run" })); await new Promise((r) => setTimeout(r, 0));
       try {
         const res = await sendAnyHttpRequest.mutateAsync(node.data.requestId);
-        results.push({ nodeId: nid, name: node.data.name, status: res?.status ?? "unknown", ok: true });
+        const ok = !!res && res.status < 400; setStatusById((m) => ({ ...m, [nid]: ok ? "ok" : "err" }));
+        results.push({ nodeId: nid, name: node.data.name, status: res?.status ?? "unknown", ok });
       } catch (e: any) {
+        setStatusById((m) => ({ ...m, [nid]: "err" }));
         results.push({ nodeId: nid, name: node.data.name, error: String(e), ok: false });
       }
     }
@@ -185,11 +224,13 @@ export function NodeSpace({ style, fullHeight }: { style?: React.CSSProperties; 
   const runSingle = async (nodeId: string) => {
     const node = nodes.find((n) => n.id === nodeId);
     if (!node) return;
-    setRunning(true);
+    setRunning(true); setStatusById((m) => ({ ...m, [nodeId]: "run" }));
     try {
       const res = await sendAnyHttpRequest.mutateAsync(node.data.requestId);
-      showToast({ message: `${node.data.name}: ${res?.status ?? "sent"}`, color: "success" });
+      setStatusById((m) => ({ ...m, [nodeId]: res && (res.status < 400 ? "ok" : "err") }));
+      showToast({ message: `${node.data.name}: ${res?.status ?? "sent"}`, color: res && res.status < 400 ? "success" : "warning" });
     } catch (e: any) {
+      setStatusById((m) => ({ ...m, [nodeId]: "err" }));
       showToast({ message: `${node.data.name} failed: ${String(e)}`, color: "danger" });
     }
     setRunning(false);
@@ -257,7 +298,7 @@ export function NodeSpace({ style, fullHeight }: { style?: React.CSSProperties; 
         <div
           ref={canvasRef}
           onClick={(e) => {
-            if (e.target === e.currentTarget) setSelectedId(null);
+            if (e.target === e.currentTarget) { setSelectedId(null); setSelectedEdgeId(null); }
           }}
           onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; setIsDragOver(true); }}
           onDragEnter={(e) => { e.preventDefault(); setIsDragOver(true); }}
@@ -274,13 +315,19 @@ export function NodeSpace({ style, fullHeight }: { style?: React.CSSProperties; 
             backgroundSize: "20px 20px",
           }}
         >
-          <svg className="absolute inset-0 w-full h-full pointer-events-none">
+          <svg className="absolute inset-0 w-full h-full" style={{ pointerEvents: "none" }}>
             {edges.map((e) => {
               const s = nodes.find((n) => n.id === e.source);
               const t = nodes.find((n) => n.id === e.target);
               if (!s || !t) return null;
               const x1 = s.x + 140, y1 = s.y + 22, x2 = t.x, y2 = t.y + 22;
-              return <path key={e.id} d={svgPath(x1, y1, x2, y2)} fill="none" stroke="var(--color-text)" strokeWidth={1.4} opacity={0.9} />;
+              const sel = selectedEdgeId === e.id;
+              return (
+                <g key={e.id} style={{ pointerEvents: "auto", cursor: "pointer" }} onClick={() => setSelectedEdgeId(e.id)}>
+                  <path d={svgPath(x1, y1, x2, y2)} fill="none" stroke="transparent" strokeWidth={12} />
+                  <path d={svgPath(x1, y1, x2, y2)} fill="none" stroke={sel ? "var(--color-primary)" : "var(--color-text)"} strokeWidth={sel ? 2.2 : 1.4} opacity={sel ? 1 : 0.9} />
+                </g>
+              );
             })}
             {pending && <path d={svgPath(pending.x1, pending.y1, pending.x2, pending.y2)} fill="none" stroke="var(--color-text)" strokeWidth={1.4} strokeDasharray="6 4" opacity={0.6} />}
           </svg>
@@ -354,9 +401,11 @@ export function NodeSpace({ style, fullHeight }: { style?: React.CSSProperties; 
                     const target = el?.closest("[data-node]") as HTMLElement | null;
                     if (target && target.dataset.node !== n.id) {
                       const tid = target.dataset.node!;
+                      if (wouldCreateCycle(n.id, tid, edges)) { showToast({ message: "Cycle not allowed", color: "warning" }); setPending(null); return; }
                       console.log("[NodeSpace] connect", n.id, "->", tid);
                       setEdges((prev) => {
                         if (prev.some((ee) => ee.source === n.id && ee.target === tid)) return prev;
+                        if (wouldCreateCycle(n.id, tid, prev)) { showToast({ message: "Cycle not allowed", color: "warning" }); return prev; }
                         const next = [...prev, { id: `e${Date.now()}${Math.random()}`, source: n.id, target: tid }];
                         // fix stale nodes: use functional nodes
                         setNodes((prevNodes) => {
