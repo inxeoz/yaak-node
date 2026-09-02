@@ -47,6 +47,80 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
     oy: number;
   } | null>(null);
   const [menu, setMenu] = useState<Menu>(null);
+  const [zoom, setZoom] = useState(1);
+  const zoomIn = () => setZoom((z) => Math.min(2.5, Math.round((z + 0.15) * 100) / 100));
+  const zoomOut = () => setZoom((z) => Math.max(0.4, Math.round((z - 0.15) * 100) / 100));
+  const zoomReset = () => setZoom(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [panDrag, setPanDrag] = useState<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const viewReset = () => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  };
+
+  // minimap: compute bounds of nodes + viewport, scale to fit 160x100
+  const MINI_W = 160;
+  const MINI_H = 100;
+  const getViewportWorld = () => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    const w = rect?.width ?? 800;
+    const h = rect?.height ?? 600;
+    return {
+      left: (-pan.x) / zoom,
+      top: (-pan.y) / zoom,
+      right: (w - pan.x) / zoom,
+      bottom: (h - pan.y) / zoom,
+      w,
+      h,
+    };
+  };
+  const mini = (() => {
+    const vp = getViewportWorld();
+    let minX = vp.left;
+    let minY = vp.top;
+    let maxX = vp.right;
+    let maxY = vp.bottom;
+    if (nodes.length > 0) {
+      const xs = nodes.map((n) => n.x);
+      const ys = nodes.map((n) => n.y);
+      const nMinX = Math.min(...xs);
+      const nMinY = Math.min(...ys);
+      const nMaxX = Math.max(...nodes.map((n) => n.x + 140));
+      const nMaxY = Math.max(...nodes.map((n) => n.y + 44));
+      minX = Math.min(minX, nMinX - 80);
+      minY = Math.min(minY, nMinY - 80);
+      maxX = Math.max(maxX, nMaxX + 80);
+      maxY = Math.max(maxY, nMaxY + 80);
+    } else {
+      // empty: show centered area around origin
+      minX -= 200;
+      minY -= 200;
+      maxX += 200;
+      maxY += 200;
+    }
+    const worldW = Math.max(1, maxX - minX);
+    const worldH = Math.max(1, maxY - minY);
+    const scale = Math.min((MINI_W - 8) / worldW, (MINI_H - 8) / worldH);
+    const offX = (MINI_W - worldW * scale) / 2;
+    const offY = (MINI_H - worldH * scale) / 2;
+    const toMini = (x: number, y: number) => ({ x: (x - minX) * scale + offX, y: (y - minY) * scale + offY });
+    const vpMini = {
+      x: (vp.left - minX) * scale + offX,
+      y: (vp.top - minY) * scale + offY,
+      w: (vp.right - vp.left) * scale,
+      h: (vp.bottom - vp.top) * scale,
+    };
+    return { minX, minY, scale, offX, offY, toMini, vpMini, worldW, worldH };
+  })();
+  const handleMiniClick = (e: React.MouseEvent) => {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const worldX = mini.minX + (mx - mini.offX) / mini.scale;
+    const worldY = mini.minY + (my - mini.offY) / mini.scale;
+    const vp = getViewportWorld();
+    setPan({ x: vp.w / 2 - worldX * zoom, y: vp.h / 2 - worldY * zoom });
+  };
 
   useEffect(() => {
     if (branchPrompt) setBranchPos(null);
@@ -115,8 +189,8 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
   const onCanvasDrop = (e: React.DragEvent) => {
     e.preventDefault();
     const rect = canvasRef.current!.getBoundingClientRect();
-    const x = e.clientX - rect.left - 40;
-    const y = e.clientY - rect.top - 20;
+    const x = (e.clientX - rect.left - pan.x) / zoom - 40;
+    const y = (e.clientY - rect.top - pan.y) / zoom - 20;
     const tryAdd = (id: string) => {
       const req = httpRequests.find((r) => r.id === id);
       if (req) {
@@ -303,8 +377,8 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
     e.preventDefault();
     e.stopPropagation();
     const rect = canvasRef.current!.getBoundingClientRect();
-    const cx = e.clientX - rect.left;
-    const cy = e.clientY - rect.top;
+    const cx = (e.clientX - rect.left - pan.x) / zoom;
+    const cy = (e.clientY - rect.top - pan.y) / zoom;
     // clamp to viewport so toolbox stays visible
     const x = e.clientX;
     const y = e.clientY;
@@ -351,14 +425,57 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
             setIsDragOver(false);
             onCanvasDrop(e);
           }}
-          className={`absolute inset-0 overflow-hidden ${isDragOver ? "bg-primary/5 ring-2 ring-primary/50" : "bg-surface"}`}
+          className={`absolute inset-0 overflow-hidden ${isDragOver ? "bg-primary/5 ring-2 ring-primary/50" : "bg-surface"} ${panDrag ? "cursor-grabbing" : "cursor-grab"}`}
           style={{
             backgroundImage:
               "linear-gradient(color-mix(in srgb, var(--color-border-subtle) 60%, transparent) 1px, transparent 1px), linear-gradient(90deg, color-mix(in srgb, var(--color-border-subtle) 60%, transparent) 1px, transparent 1px)",
-            backgroundSize: "20px 20px",
+            backgroundSize: `${20 * zoom}px ${20 * zoom}px`,
+            backgroundPosition: `${pan.x}px ${pan.y}px`,
+          }}
+          onWheel={(e) => {
+            if (e.ctrlKey || e.metaKey) {
+              e.preventDefault();
+              if (e.deltaY < 0) zoomIn();
+              else zoomOut();
+            } else {
+              // wheel/trackpad pans canvas
+              if (Math.abs(e.deltaX) > 0 || Math.abs(e.deltaY) > 0) {
+                e.preventDefault();
+                setPan((p) => ({ x: p.x - e.deltaX, y: p.y - e.deltaY }));
+              }
+            }
+          }}
+          onPointerDown={(e) => {
+            // middle-drag pans anywhere; left-drag pans background only
+            if (e.button === 1) {
+              e.preventDefault();
+              setPanDrag({ sx: e.clientX, sy: e.clientY, ox: pan.x, oy: pan.y });
+              (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+              return;
+            }
+            if (e.button !== 0) return;
+            const target = e.target as HTMLElement;
+            if (target.closest("[data-node]") || target.closest("[data-handle]") || target.closest("button")) return;
+            setPanDrag({ sx: e.clientX, sy: e.clientY, ox: pan.x, oy: pan.y });
+            (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+          }}
+          onPointerMove={(e) => {
+            if (!panDrag) return;
+            setPan({ x: panDrag.ox + e.clientX - panDrag.sx, y: panDrag.oy + e.clientY - panDrag.sy });
+          }}
+          onPointerUp={(e) => {
+            if (!panDrag) return;
+            setPanDrag(null);
+            try {
+              (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+            } catch {}
           }}
         >
-          <svg className="absolute inset-0 w-full h-full" style={{ pointerEvents: "none" }}>
+          <div
+            className="absolute inset-0"
+            style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: "0 0", width: "100%", height: "100%" }}
+          >
+          <svg className="absolute inset-0 w-full h-full" style={{ pointerEvents: "none", overflow: "visible" }}>
             {edges.map((e) => {
               const s = nodes.find((n) => n.id === e.source);
               const t = nodes.find((n) => n.id === e.target);
@@ -424,11 +541,14 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
                 saveSoon={saveSoon}
                 edges={edges}
                 nodes={nodes}
+                zoom={zoom}
+                pan={pan}
                 onContextMenu={(e) => openMenu(e, "node", n.id)}
               />
             );
           })}
 
+          </div>
           {nodes.length === 0 && (
             <div className="absolute inset-0 grid place-items-center pointer-events-none">
               <div className="text-sm text-text-subtle border border-dashed border-border-subtle rounded-lg px-4 py-3 bg-surface/80 text-center">
@@ -436,6 +556,98 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
               </div>
             </div>
           )}
+        </div>
+
+        <div className="absolute bottom-3 right-3 z-10 flex items-center gap-1 bg-surface border border-border-subtle rounded-lg shadow-md p-1">
+          <button
+            type="button"
+            onClick={zoomOut}
+            disabled={zoom <= 0.4}
+            className="w-7 h-7 grid place-items-center rounded hover:bg-surface-highlight disabled:opacity-40 text-sm"
+            title="Zoom out"
+            aria-label="Zoom out"
+          >
+            −
+          </button>
+          <span className="text-xs text-text-subtle min-w-[3ch] text-center select-none">
+            {Math.round(zoom * 100)}%
+          </span>
+          <button
+            type="button"
+            onClick={zoomIn}
+            disabled={zoom >= 2.5}
+            className="w-7 h-7 grid place-items-center rounded hover:bg-surface-highlight disabled:opacity-40 text-sm"
+            title="Zoom in"
+            aria-label="Zoom in"
+          >
+            +
+          </button>
+          <div className="w-px h-5 bg-border-subtle mx-1" />
+          <button
+            type="button"
+            onClick={zoomReset}
+            disabled={zoom === 1}
+            className="px-2 h-7 grid place-items-center rounded hover:bg-surface-highlight disabled:opacity-40 text-xs"
+            title="Reset zoom"
+          >
+            Reset
+          </button>
+          <button
+            type="button"
+            onClick={viewReset}
+            disabled={zoom === 1 && pan.x === 0 && pan.y === 0}
+            className="px-2 h-7 grid place-items-center rounded hover:bg-surface-highlight disabled:opacity-40 text-xs"
+            title="Reset view (zoom & pan)"
+          >
+            ⟲
+          </button>
+        </div>
+        {/* minimap */}
+        <div className="absolute bottom-3 left-3 z-10 w-[160px] h-[100px] bg-surface border border-border-subtle rounded-lg shadow-md overflow-hidden">
+          <div className="absolute inset-0 cursor-pointer" onClick={handleMiniClick} title="Click to pan">
+            <svg className="absolute inset-0 w-full h-full" style={{ pointerEvents: "none" }}>
+              {edges.map((e) => {
+                const s = nodes.find((n) => n.id === e.source);
+                const t = nodes.find((n) => n.id === e.target);
+                if (!s || !t) return null;
+                const a = mini.toMini(s.x + 140, s.y + 22);
+                const b = mini.toMini(t.x, t.y + 22);
+                const dx = Math.abs(b.x - a.x) * 0.5;
+                return (
+                  <path
+                    key={e.id}
+                    d={`M${a.x},${a.y} C${a.x + dx},${a.y} ${b.x - dx},${b.y} ${b.x},${b.y}`}
+                    fill="none"
+                    stroke="var(--color-text)"
+                    strokeWidth={1}
+                    opacity={0.6}
+                  />
+                );
+              })}
+            </svg>
+            {nodes.map((n) => {
+              const p = mini.toMini(n.x, n.y);
+              const isSel = selectedId === n.id;
+              return (
+                <div
+                  key={n.id}
+                  className={`absolute rounded-[2px] border ${isSel ? "bg-primary/20 border-primary" : "bg-surface border-border"}`}
+                  style={{ left: p.x, top: p.y, width: 140 * mini.scale, height: 28 * mini.scale }}
+                />
+              );
+            })}
+            {/* viewport rect */}
+            <div
+              className="absolute border border-primary bg-primary/10 rounded-[2px] pointer-events-none"
+              style={{
+                left: mini.vpMini.x,
+                top: mini.vpMini.y,
+                width: mini.vpMini.w,
+                height: mini.vpMini.h,
+              }}
+            />
+          </div>
+          <div className="absolute top-1 left-1 text-[8px] font-semibold tracking-wide text-text-subtle bg-surface/80 px-1 rounded">MAP</div>
         </div>
 
         {menu && (
@@ -566,6 +778,49 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
                   }}
                 >
                   ⤳ Run Flow (selected)
+                </button>
+                <div className="h-px bg-border-subtle my-1" />
+                <div className="px-3 py-1 text-[11px] font-semibold text-text-subtle">Zoom & Pan</div>
+                <button
+                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50 flex items-center justify-between"
+                  disabled={zoom >= 2.5}
+                  onClick={() => {
+                    zoomIn();
+                    setMenu(null);
+                  }}
+                >
+                  <span>Zoom in +</span>
+                  <span className="text-xs text-text-subtle">{Math.round(zoom * 100)}%</span>
+                </button>
+                <button
+                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
+                  disabled={zoom <= 0.4}
+                  onClick={() => {
+                    zoomOut();
+                    setMenu(null);
+                  }}
+                >
+                  Zoom out −
+                </button>
+                <button
+                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
+                  disabled={zoom === 1}
+                  onClick={() => {
+                    zoomReset();
+                    setMenu(null);
+                  }}
+                >
+                  Reset zoom
+                </button>
+                <button
+                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
+                  disabled={zoom === 1 && pan.x === 0 && pan.y === 0}
+                  onClick={() => {
+                    viewReset();
+                    setMenu(null);
+                  }}
+                >
+                  Reset view
                 </button>
                 <div className="h-px bg-border-subtle my-1" />
                 <button

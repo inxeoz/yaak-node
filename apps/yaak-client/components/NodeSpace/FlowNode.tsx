@@ -19,6 +19,8 @@ type Props = {
   saveSoon: (n: Node[], e: Edge[]) => void;
   edges: Edge[];
   nodes: Node[];
+  zoom: number;
+  pan: { x: number; y: number };
   onContextMenu?: (e: React.MouseEvent) => void;
 };
 
@@ -35,6 +37,8 @@ export function FlowNode({
   setPending,
   saveSoon,
   edges,
+  zoom,
+  pan,
   onContextMenu,
 }: Props) {
   return (
@@ -45,8 +49,8 @@ export function FlowNode({
         const target = e.target as HTMLElement;
         if (target.closest("[data-handle]")) return;
         const crect = canvasRef.current!.getBoundingClientRect();
-        const offsetX = e.clientX - crect.left - n.x;
-        const offsetY = e.clientY - crect.top - n.y;
+        const offsetX = (e.clientX - crect.left - pan.x) / zoom - n.x;
+        const offsetY = (e.clientY - crect.top - pan.y) / zoom - n.y;
         setDrag({ id: n.id, dx: offsetX, dy: offsetY });
         (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
       }}
@@ -55,8 +59,8 @@ export function FlowNode({
       onPointerMove={(e) => {
         if (drag?.id !== n.id) return;
         const crect = canvasRef.current!.getBoundingClientRect();
-        const cx = e.clientX - crect.left - drag.dx;
-        const cy = e.clientY - crect.top - drag.dy;
+        const cx = (e.clientX - crect.left - pan.x) / zoom - drag.dx;
+        const cy = (e.clientY - crect.top - pan.y) / zoom - drag.dy;
         setNodes((prev) => prev.map((p) => (p.id === n.id ? { ...p, x: cx, y: cy } : p)));
       }}
       onPointerUp={() => {
@@ -93,7 +97,7 @@ export function FlowNode({
           const move = (ev: PointerEvent) => {
             const crect = canvasRef.current!.getBoundingClientRect();
             setPending((prev) =>
-              prev ? { ...prev, x2: ev.clientX - crect.left, y2: ev.clientY - crect.top } : null,
+              prev ? { ...prev, x2: (ev.clientX - crect.left - pan.x) / zoom, y2: (ev.clientY - crect.top - pan.y) / zoom } : null,
             );
           };
           const up = (ev: PointerEvent) => {
