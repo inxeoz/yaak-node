@@ -32,6 +32,8 @@ export function NodeSpace({ style, fullHeight }: { style?: React.CSSProperties; 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [statusById, setStatusById] = useState<Record<string, "ok" | "err" | "run">>({});
+  const [branchPrompt, setBranchPrompt] = useState<{ from: string; targets: Node[] } | null>(null);
+  const [flowRunning, setFlowRunning] = useState(false);
   const [log, setLog] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const nextId = useRef(1);
@@ -236,6 +238,48 @@ export function NodeSpace({ style, fullHeight }: { style?: React.CSSProperties; 
     setRunning(false);
   };
 
+  const runFlow = async (startId: string) => {
+    const start = nodes.find((n) => n.id === startId);
+    if (!start) return;
+    setFlowRunning(true);
+    let cur: string | null = startId;
+    const visited = new Set<string>();
+    while (cur) {
+      if (visited.has(cur)) { showToast({ message: "Cycle detected, stopping", color: "warning" }); break; }
+      visited.add(cur);
+      const node = nodes.find((n) => n.id === cur);
+      if (!node) break;
+      setSelectedId(cur);
+      setStatusById((m) => ({ ...m, [cur!]: "run" }));
+      await new Promise((r) => setTimeout(r, 0));
+      try {
+        const res = await sendAnyHttpRequest.mutateAsync(node.data.requestId);
+        const ok = !!res && res.status < 400;
+        setStatusById((m) => ({ ...m, [cur!]: ok ? "ok" : "err" }));
+        if (!ok) { showToast({ message: `${node.data.name} failed (${res?.status}), stopping`, color: "danger" }); break; }
+      } catch (e: any) {
+        setStatusById((m) => ({ ...m, [cur!]: "err" }));
+        showToast({ message: `${node.data.name} error: ${String(e)}`, color: "danger" });
+        break;
+      }
+      const outs = edges.filter((e) => e.source === cur).map((e) => e.target);
+      if (outs.length === 0) { showToast({ message: "Flow complete", color: "success" }); break; }
+      if (outs.length === 1) { cur = outs[0] ?? null; continue; }
+      // branching: prompt user to pick
+      const targets = outs.map((id) => nodes.find((n) => n.id === id)).filter(Boolean) as Node[];
+      const choice = await new Promise<string | null>((resolve) => {
+        setBranchPrompt({ from: cur!, targets });
+        // store resolver globally for buttons
+        (window as any).__branchResolve = resolve;
+      });
+      setBranchPrompt(null);
+      (window as any).__branchResolve = null;
+      if (!choice) { showToast({ message: "Flow cancelled at branch", color: "notice" }); break; }
+      cur = choice;
+    }
+    setFlowRunning(false);
+  };
+
   return (
     <div style={style} className="w-full h-full flex flex-col bg-surface overflow-hidden">
       <div className="h-10 shrink-0 flex items-center gap-2 px-2 border-b border-border-subtle bg-surface">
@@ -283,14 +327,23 @@ export function NodeSpace({ style, fullHeight }: { style?: React.CSSProperties; 
         <Button
           size="xs"
           variant="border"
-          disabled={running || !selectedId}
+          disabled={running || flowRunning || !selectedId}
           onClick={() => selectedId && runSingle(selectedId)}
           title={selectedId ? `Run ${nodes.find((n) => n.id === selectedId)?.data.name ?? ""}` : "Select a node first"}
         >
           ▶ Run Selected
         </Button>
-        <Button size="xs" color="primary" disabled={running} onClick={run}>
-          {running ? "Running…" : "▶ Run All"}
+        <Button
+          size="xs"
+          variant="border"
+          disabled={running || flowRunning || !selectedId}
+          onClick={() => selectedId && runFlow(selectedId)}
+          title={selectedId ? `Run Flow from ${nodes.find((n) => n.id === selectedId)?.data.name ?? ""}` : "Select start node"}
+        >
+          ⤳ Run Flow
+        </Button>
+        <Button size="xs" color="primary" disabled={running || flowRunning} onClick={run}>
+          {running || flowRunning ? "Running…" : "▶ Run All"}
         </Button>
       </div>
 
@@ -454,6 +507,31 @@ export function NodeSpace({ style, fullHeight }: { style?: React.CSSProperties; 
 
           {/* log hidden — right HttpResponsePane shows response */}
         </div>
+
+        {branchPrompt && (
+          <div className="absolute inset-0 bg-backdrop/40 grid place-items-center z-10">
+            <div className="bg-surface border border-border-subtle rounded-lg shadow-lg p-4 min-w-[320px] max-w-[90%]">
+              <div className="text-sm font-semibold mb-1">Branch: {nodes.find((n) => n.id === branchPrompt.from)?.data.name ?? branchPrompt.from} → ?</div>
+              <div className="text-xs text-text-subtle mb-3">Select which way to continue flow</div>
+              <div className="flex flex-col gap-2">
+                {branchPrompt.targets.map((t) => (
+                  <Button
+                    key={t.id}
+                    size="sm"
+                    variant="border"
+                    className="justify-start"
+                    onClick={() => (window as any).__branchResolve?.(t.id)}
+                  >
+                    <span className="text-xs font-mono bg-surface-highlight px-1 rounded mr-2">{t.data.method}</span> {t.data.name || t.data.url}
+                  </Button>
+                ))}
+              </div>
+              <div className="flex justify-end gap-2 mt-4">
+                <Button size="xs" variant="border" onClick={() => (window as any).__branchResolve?.(null)}>Cancel Flow</Button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
