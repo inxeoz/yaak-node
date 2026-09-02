@@ -5,6 +5,7 @@ import { activeRequestAtom } from "../../hooks/useActiveRequest";
 import { activeWorkspaceAtom } from "../../hooks/useActiveWorkspace";
 import { sendAnyHttpRequest } from "../../hooks/useSendAnyHttpRequest";
 import { showToast } from "../../lib/toast";
+import { Icon } from "@yaakapp-internal/ui";
 import { BranchPrompt } from "./BranchPrompt";
 import { FlowNode } from "./FlowNode";
 import { svgPath, topoSort } from "./graph";
@@ -16,6 +17,29 @@ type Menu =
   | { x: number; y: number; cx: number; cy: number; kind: "node"; id: string }
   | { x: number; y: number; cx: number; cy: number; kind: "edge"; id: string }
   | null;
+
+type Settings = {
+  minimap: boolean;
+  canvas: {
+    addSelected: boolean;
+    runAll: boolean;
+    runSelected: boolean;
+    runFlow: boolean;
+    zoom: boolean;
+    resetView: boolean;
+    clearCanvas: boolean;
+  };
+  node: { run: boolean; runFlow: boolean; del: boolean };
+  edge: { del: boolean };
+};
+
+const defaultSettings: Settings = {
+  minimap: true,
+  canvas: { addSelected: true, runAll: true, runSelected: true, runFlow: true, zoom: true, resetView: true, clearCanvas: true },
+  node: { run: true, runFlow: true, del: true },
+  edge: { del: true },
+};
+const SETTINGS_KEY = "node_space_settings";
 
 export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?: boolean }) {
   const httpRequests = useAtomValue(httpRequestsAtom);
@@ -57,6 +81,27 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
     setZoom(1);
     setPan({ x: 0, y: 0 });
   };
+  const [showSettings, setShowSettings] = useState(false);
+  const [settings, setSettings] = useState<Settings>(() => {
+    try {
+      const raw = localStorage.getItem(SETTINGS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as Partial<Settings>;
+        return {
+          minimap: parsed.minimap ?? defaultSettings.minimap,
+          canvas: { ...defaultSettings.canvas, ...(parsed.canvas ?? {}) },
+          node: { ...defaultSettings.node, ...(parsed.node ?? {}) },
+          edge: { ...defaultSettings.edge, ...(parsed.edge ?? {}) },
+        };
+      }
+    } catch {}
+    return defaultSettings;
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    } catch {}
+  }, [settings]);
 
   // minimap: compute bounds of nodes + viewport, scale to fit 160x100
   const MINI_W = 160;
@@ -146,6 +191,26 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
       window.removeEventListener("keydown", onKey);
     };
   }, [menu]);
+
+  // close settings on outside click/escape
+  useEffect(() => {
+    if (!showSettings) return;
+    const close = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest("[data-settings-panel]") && !target.closest("[data-settings-button]")) setShowSettings(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowSettings(false);
+    };
+    // delay to avoid immediate close from the button click that opened it
+    const id = setTimeout(() => window.addEventListener("click", close), 0);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      clearTimeout(id);
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [showSettings]);
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -390,7 +455,7 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
 
   return (
     <div style={style} className="w-full h-full flex flex-col bg-surface overflow-hidden">
-      <div className="h-10 shrink-0 flex items-center gap-2 px-2 border-b border-border-subtle bg-surface">
+      <div className="h-10 shrink-0 flex items-center gap-2 px-2 border-b border-border-subtle bg-surface relative">
         <span className="text-sm font-semibold">Node Space</span>
         <span className="text-xs text-text-subtle">
           {nodes.length} nodes • {edges.length} edges
@@ -399,6 +464,76 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
         <span className="text-[11px] text-text-subtle hidden sm:inline">
           {selectedId ? `selected: ${nodes.find((n) => n.id === selectedId)?.data.name ?? selectedId}` : "no selection"}
         </span>
+        <button
+          data-settings-button
+          type="button"
+          onClick={() => setShowSettings((v) => !v)}
+          className={`w-7 h-7 grid place-items-center rounded hover:bg-surface-highlight border ${showSettings ? "bg-surface-highlight border-border" : "border-transparent"}`}
+          title="Node Space settings"
+          aria-label="Node Space settings"
+        >
+          <Icon icon="settings" size="sm" />
+        </button>
+        {showSettings && (
+          <div data-settings-panel className="absolute top-10 right-2 z-30 w-[300px] bg-surface border border-border-subtle rounded-lg shadow-xl p-3 text-sm">
+          <div className="flex items-center justify-between mb-2">
+            <span className="font-semibold">Node Space Settings</span>
+            <button type="button" onClick={() => setShowSettings(false)} className="w-6 h-6 grid place-items-center rounded hover:bg-surface-highlight text-text-subtle">
+              ✕
+            </button>
+          </div>
+          <label className="flex items-center gap-2 py-1 cursor-pointer">
+            <input type="checkbox" checked={settings.minimap} onChange={(e) => setSettings((s) => ({ ...s, minimap: e.target.checked }))} />
+            <span>Show minimap</span>
+          </label>
+          <div className="h-px bg-border-subtle my-2" />
+          <div className="text-xs font-semibold text-text-subtle mb-1">Canvas menu</div>
+          {(
+            [
+              ["addSelected", "Add Selected here"],
+              ["runAll", "Run All"],
+              ["runSelected", "Run Selected"],
+              ["runFlow", "Run Flow"],
+              ["zoom", "Zoom controls"],
+              ["resetView", "Reset view"],
+              ["clearCanvas", "Clear Canvas"],
+            ] as const
+          ).map(([k, label]) => (
+            <label key={k} className="flex items-center gap-2 py-0.5 cursor-pointer text-xs">
+              <input
+                type="checkbox"
+                checked={(settings.canvas as Record<string, boolean>)[k]}
+                onChange={(e) => setSettings((s) => ({ ...s, canvas: { ...s.canvas, [k]: e.target.checked } }))}
+              />
+              <span>{label}</span>
+            </label>
+          ))}
+          <div className="h-px bg-border-subtle my-2" />
+          <div className="text-xs font-semibold text-text-subtle mb-1">Node menu</div>
+          {(
+            [
+              ["run", "Run"],
+              ["runFlow", "Run Flow from here"],
+              ["del", "Delete Node"],
+            ] as const
+          ).map(([k, label]) => (
+            <label key={k} className="flex items-center gap-2 py-0.5 cursor-pointer text-xs">
+              <input
+                type="checkbox"
+                checked={(settings.node as Record<string, boolean>)[k]}
+                onChange={(e) => setSettings((s) => ({ ...s, node: { ...s.node, [k]: e.target.checked } }))}
+              />
+              <span>{label}</span>
+            </label>
+          ))}
+          <div className="h-px bg-border-subtle my-2" />
+          <div className="text-xs font-semibold text-text-subtle mb-1">Edge menu</div>
+          <label className="flex items-center gap-2 py-0.5 cursor-pointer text-xs">
+            <input type="checkbox" checked={settings.edge.del} onChange={(e) => setSettings((s) => ({ ...s, edge: { ...s.edge, del: e.target.checked } }))} />
+            <span>Delete Connection</span>
+          </label>
+        </div>
+        )}
       </div>
 
       <div className="flex-1 min-h-0 relative">
@@ -603,7 +738,8 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
           </button>
         </div>
         {/* minimap */}
-        <div className="absolute bottom-3 left-3 z-10 w-[160px] h-[100px] bg-surface border border-border-subtle rounded-lg shadow-md overflow-hidden">
+        {settings.minimap && (
+          <div className="absolute bottom-3 left-3 z-10 w-[160px] h-[100px] bg-surface border border-border-subtle rounded-lg shadow-md overflow-hidden">
           <div className="absolute inset-0 cursor-pointer" onClick={handleMiniClick} title="Click to pan">
             <svg className="absolute inset-0 w-full h-full" style={{ pointerEvents: "none" }}>
               {edges.map((e) => {
@@ -648,7 +784,8 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
             />
           </div>
           <div className="absolute top-1 left-1 text-[8px] font-semibold tracking-wide text-text-subtle bg-surface/80 px-1 rounded">MAP</div>
-        </div>
+          </div>
+        )}
 
         {menu && (
           <div
@@ -665,35 +802,51 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
                 <div className="px-3 py-1.5 text-xs font-semibold text-text-subtle border-b border-border-subtle truncate">
                   {nodes.find((n) => n.id === menu.id)?.data.name || menu.id}
                 </div>
-                <button
-                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
-                  disabled={running || flowRunning}
-                  onClick={() => {
-                    setMenu(null);
-                    runSingle(menu.id!);
-                  }}
-                >
-                  ▶ Run
-                </button>
-                <button
-                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
-                  disabled={running || flowRunning}
-                  onClick={() => {
-                    setMenu(null);
-                    runFlow(menu.id!);
-                  }}
-                >
-                  ⤳ Run Flow from here
-                </button>
+                {settings.node.run && (
+                  <button
+                    className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
+                    disabled={running || flowRunning}
+                    onClick={() => {
+                      setMenu(null);
+                      runSingle(menu.id!);
+                    }}
+                  >
+                    ▶ Run
+                  </button>
+                )}
+                {settings.node.runFlow && (
+                  <button
+                    className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
+                    disabled={running || flowRunning}
+                    onClick={() => {
+                      setMenu(null);
+                      runFlow(menu.id!);
+                    }}
+                  >
+                    ⤳ Run Flow from here
+                  </button>
+                )}
+                {(settings.node.run || settings.node.runFlow) && settings.node.del && <div className="h-px bg-border-subtle my-1" />}
+                {settings.node.del && (
+                  <button
+                    className="w-full text-left px-3 py-1.5 hover:bg-danger/10 text-danger"
+                    onClick={() => {
+                      setMenu(null);
+                      deleteNode(menu.id!);
+                    }}
+                  >
+                    ✕ Delete Node
+                  </button>
+                )}
                 <div className="h-px bg-border-subtle my-1" />
                 <button
-                  className="w-full text-left px-3 py-1.5 hover:bg-danger/10 text-danger"
+                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight text-text-subtle"
                   onClick={() => {
                     setMenu(null);
-                    deleteNode(menu.id!);
+                    setShowSettings(true);
                   }}
                 >
-                  ✕ Delete Node
+                  ⚙ Settings
                 </button>
               </>
             )}
@@ -703,14 +856,26 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
                 <div className="px-3 py-1.5 text-xs font-semibold text-text-subtle border-b border-border-subtle">
                   Connection
                 </div>
+                {settings.edge.del && (
+                  <button
+                    className="w-full text-left px-3 py-1.5 hover:bg-danger/10 text-danger"
+                    onClick={() => {
+                      setMenu(null);
+                      deleteEdge(menu.id!);
+                    }}
+                  >
+                    ✕ Delete Connection
+                  </button>
+                )}
+                <div className="h-px bg-border-subtle my-1" />
                 <button
-                  className="w-full text-left px-3 py-1.5 hover:bg-danger/10 text-danger"
+                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight text-text-subtle"
                   onClick={() => {
                     setMenu(null);
-                    deleteEdge(menu.id!);
+                    setShowSettings(true);
                   }}
                 >
-                  ✕ Delete Connection
+                  ⚙ Settings
                 </button>
               </>
             )}
@@ -720,118 +885,143 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
                 <div className="px-3 py-1.5 text-xs font-semibold text-text-subtle border-b border-border-subtle">
                   Toolbox
                 </div>
-
-                <button
-                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50 disabled:cursor-not-allowed"
-                  disabled={
-                    !activeRequest ||
-                    (activeRequest as unknown as { model: string }).model !== "http_request"
-                  }
-                  onClick={() => {
-                    if (
-                      activeRequest &&
-                      (activeRequest as unknown as { model: string }).model === "http_request"
-                    ) {
-                      addNode(
-                        activeRequest as unknown as {
-                          id: string;
-                          name: string;
-                          method: string;
-                          url: string;
-                        },
-                        menu.cx,
-                        menu.cy,
-                      );
+                {settings.canvas.addSelected && (
+                  <button
+                    className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50 disabled:cursor-not-allowed"
+                    disabled={
+                      !activeRequest ||
+                      (activeRequest as unknown as { model: string }).model !== "http_request"
                     }
-                    setMenu(null);
-                  }}
-                >
-                  + Add Selected here
-                </button>
-
-                <button
-                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
-                  disabled={running || flowRunning || nodes.length === 0}
-                  onClick={() => {
-                    setMenu(null);
-                    run();
-                  }}
-                >
-                  ▶ Run All
-                </button>
-                <button
-                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
-                  disabled={running || flowRunning || !selectedId}
-                  onClick={() => {
-                    setMenu(null);
-                    if (selectedId) runSingle(selectedId);
-                  }}
-                >
-                  ▶ Run Selected
-                </button>
-                <button
-                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
-                  disabled={running || flowRunning || !selectedId}
-                  onClick={() => {
-                    setMenu(null);
-                    if (selectedId) runFlow(selectedId);
-                  }}
-                >
-                  ⤳ Run Flow (selected)
-                </button>
+                    onClick={() => {
+                      if (
+                        activeRequest &&
+                        (activeRequest as unknown as { model: string }).model === "http_request"
+                      ) {
+                        addNode(
+                          activeRequest as unknown as {
+                            id: string;
+                            name: string;
+                            method: string;
+                            url: string;
+                          },
+                          menu.cx,
+                          menu.cy,
+                        );
+                      }
+                      setMenu(null);
+                    }}
+                  >
+                    + Add Selected here
+                  </button>
+                )}
+                {settings.canvas.runAll && (
+                  <button
+                    className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
+                    disabled={running || flowRunning || nodes.length === 0}
+                    onClick={() => {
+                      setMenu(null);
+                      run();
+                    }}
+                  >
+                    ▶ Run All
+                  </button>
+                )}
+                {settings.canvas.runSelected && (
+                  <button
+                    className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
+                    disabled={running || flowRunning || !selectedId}
+                    onClick={() => {
+                      setMenu(null);
+                      if (selectedId) runSingle(selectedId);
+                    }}
+                  >
+                    ▶ Run Selected
+                  </button>
+                )}
+                {settings.canvas.runFlow && (
+                  <button
+                    className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
+                    disabled={running || flowRunning || !selectedId}
+                    onClick={() => {
+                      setMenu(null);
+                      if (selectedId) runFlow(selectedId);
+                    }}
+                  >
+                    ⤳ Run Flow (selected)
+                  </button>
+                )}
+                {(settings.canvas.runAll || settings.canvas.runSelected || settings.canvas.runFlow) &&
+                  (settings.canvas.zoom || settings.canvas.resetView) && <div className="h-px bg-border-subtle my-1" />}
+                {settings.canvas.zoom && (
+                  <>
+                    <div className="px-3 py-1 text-[11px] font-semibold text-text-subtle">Zoom & Pan</div>
+                    <button
+                      className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50 flex items-center justify-between"
+                      disabled={zoom >= 2.5}
+                      onClick={() => {
+                        zoomIn();
+                        setMenu(null);
+                      }}
+                    >
+                      <span>Zoom in +</span>
+                      <span className="text-xs text-text-subtle">{Math.round(zoom * 100)}%</span>
+                    </button>
+                    <button
+                      className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
+                      disabled={zoom <= 0.4}
+                      onClick={() => {
+                        zoomOut();
+                        setMenu(null);
+                      }}
+                    >
+                      Zoom out −
+                    </button>
+                    <button
+                      className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
+                      disabled={zoom === 1}
+                      onClick={() => {
+                        zoomReset();
+                        setMenu(null);
+                      }}
+                    >
+                      Reset zoom
+                    </button>
+                  </>
+                )}
+                {settings.canvas.resetView && (
+                  <button
+                    className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
+                    disabled={zoom === 1 && pan.x === 0 && pan.y === 0}
+                    onClick={() => {
+                      viewReset();
+                      setMenu(null);
+                    }}
+                  >
+                    Reset view
+                  </button>
+                )}
+                {(settings.canvas.zoom || settings.canvas.resetView) && settings.canvas.clearCanvas && <div className="h-px bg-border-subtle my-1" />}
+                {settings.canvas.clearCanvas && (
+                  <button
+                    className="w-full text-left px-3 py-1.5 hover:bg-danger/10 text-danger disabled:opacity-50"
+                    disabled={nodes.length === 0 && edges.length === 0}
+                    onClick={() => {
+                      setMenu(null);
+                      clearAll();
+                    }}
+                  >
+                    ✕ Clear Canvas
+                  </button>
+                )}
                 <div className="h-px bg-border-subtle my-1" />
-                <div className="px-3 py-1 text-[11px] font-semibold text-text-subtle">Zoom & Pan</div>
                 <button
-                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50 flex items-center justify-between"
-                  disabled={zoom >= 2.5}
-                  onClick={() => {
-                    zoomIn();
-                    setMenu(null);
-                  }}
-                >
-                  <span>Zoom in +</span>
-                  <span className="text-xs text-text-subtle">{Math.round(zoom * 100)}%</span>
-                </button>
-                <button
-                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
-                  disabled={zoom <= 0.4}
-                  onClick={() => {
-                    zoomOut();
-                    setMenu(null);
-                  }}
-                >
-                  Zoom out −
-                </button>
-                <button
-                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
-                  disabled={zoom === 1}
-                  onClick={() => {
-                    zoomReset();
-                    setMenu(null);
-                  }}
-                >
-                  Reset zoom
-                </button>
-                <button
-                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight disabled:opacity-50"
-                  disabled={zoom === 1 && pan.x === 0 && pan.y === 0}
-                  onClick={() => {
-                    viewReset();
-                    setMenu(null);
-                  }}
-                >
-                  Reset view
-                </button>
-                <div className="h-px bg-border-subtle my-1" />
-                <button
-                  className="w-full text-left px-3 py-1.5 hover:bg-danger/10 text-danger disabled:opacity-50"
-                  disabled={nodes.length === 0 && edges.length === 0}
+                  className="w-full text-left px-3 py-1.5 hover:bg-surface-highlight text-text-subtle"
                   onClick={() => {
                     setMenu(null);
-                    clearAll();
+                    setShowSettings(true);
                   }}
                 >
-                  ✕ Clear Canvas
+                  ⚙ Settings
                 </button>
               </>
             )}
