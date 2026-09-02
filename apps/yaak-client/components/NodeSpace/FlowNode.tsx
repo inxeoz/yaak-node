@@ -231,41 +231,6 @@ export function FlowNode({
             title="Drag to resize width"
           />
           <div
-            data-resize="s"
-            onPointerDown={(e) => {
-              e.stopPropagation();
-              e.preventDefault();
-              const startY = e.clientY;
-              const startH = n.h ?? NODE_MIN_H;
-              const onMove = (ev: PointerEvent) => {
-                const dy = (ev.clientY - startY) / zoom;
-                let nh = Math.round((startH + dy) / 10) * 10;
-                nh = Math.max(NODE_MIN_H, Math.min(NODE_MAX_H, nh));
-                setNodes((prev) => prev.map((p) => (p.id === n.id ? { ...p, h: nh } : p)));
-              };
-              const onUp = () => {
-                document.removeEventListener("pointermove", onMove);
-                document.removeEventListener("pointerup", onUp);
-                setNodes((prev) => {
-                  if (noOverlap) {
-                    const cur = prev.find((p) => p.id === n.id);
-                    if (cur && wouldOverlap(cur.id, cur.x, cur.y, cur.w ?? NODE_MIN_W, cur.h ?? NODE_MIN_H, prev, gap)) {
-                      const fixed = prev.map((p) => (p.id === n.id ? { ...p, h: startH } : p));
-                      saveSoon(fixed, edges);
-                      return fixed;
-                    }
-                  }
-                  saveSoon(prev, edges);
-                  return prev;
-                });
-              };
-              document.addEventListener("pointermove", onMove);
-              document.addEventListener("pointerup", onUp);
-            }}
-            className="absolute -bottom-1 left-0 right-0 h-2 cursor-ns-resize hover:bg-primary/20"
-            title="Drag to resize height"
-          />
-          <div
             data-resize="se"
             onPointerDown={(e) => {
               e.stopPropagation();

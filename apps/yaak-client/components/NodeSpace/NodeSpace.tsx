@@ -30,17 +30,19 @@ type Settings = {
     resetView: boolean;
     clearCanvas: boolean;
   };
-  node: { run: boolean; runFlow: boolean; del: boolean; resize: boolean; duplicate: boolean };
+  node: { run: boolean; runFlow: boolean; del: boolean; resize: boolean; duplicate: boolean; delay: boolean; retry: boolean };
   edge: { del: boolean };
   layout: { noOverlap: boolean; gap: number };
+  ui: { headerDelayRetry: boolean; menuDelayRetry: boolean };
 };
 
 const defaultSettings: Settings = {
   minimap: true,
   canvas: { addSelected: true, runAll: true, runSelected: true, runFlow: true, zoom: true, resetView: true, clearCanvas: true },
-  node: { run: true, runFlow: true, del: true, resize: true, duplicate: true },
+  node: { run: true, runFlow: true, del: true, resize: true, duplicate: true, delay: true, retry: true },
   edge: { del: true },
   layout: { noOverlap: true, gap: 10 },
+  ui: { headerDelayRetry: true, menuDelayRetry: true },
 };
 const SETTINGS_KEY = "node_space_settings";
 
@@ -125,6 +127,7 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
           node: { ...defaultSettings.node, ...(parsed.node ?? {}) },
           edge: { ...defaultSettings.edge, ...(parsed.edge ?? {}) },
           layout: { ...defaultSettings.layout, ...(parsed.layout ?? {}) },
+          ui: { ...defaultSettings.ui, ...(parsed.ui ?? {}) },
         };
       }
     } catch {}
@@ -687,6 +690,34 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
         <span className="text-[11px] text-text-subtle hidden sm:inline">
           {selectedId ? `selected: ${nodes.find((n) => n.id === selectedId)?.data.name ?? selectedId}` : "no selection"}
         </span>
+        {selectedId && settings.ui.headerDelayRetry && (() => {
+          const sel = nodes.find((n) => n.id === selectedId);
+          if (!sel) return null;
+          const update = (patch: Partial<typeof sel.data>) => {
+            setNodes((prev) => {
+              const next = prev.map((p) => (p.id === selectedId ? { ...p, data: { ...p.data, ...patch } } : p));
+              saveSoon(next, edges);
+              return next;
+            });
+          };
+          return (
+            <>
+              {settings.node.delay && (
+                <label className="flex items-center gap-1 text-xs">
+                  Delay
+                  <input type="number" min={0} max={10000} step={100} value={sel.data.delayMs ?? 0} onChange={(e) => update({ delayMs: Math.max(0, parseInt(e.target.value) || 0) || undefined })} className="w-12 px-1 py-0.5 border border-border-subtle rounded bg-surface text-xs" />
+                  ms
+                </label>
+              )}
+              {settings.node.retry && (
+                <label className="flex items-center gap-1 text-xs">
+                  Retry
+                  <input type="number" min={0} max={5} value={sel.data.retry ?? 0} onChange={(e) => update({ retry: Math.max(0, Math.min(5, parseInt(e.target.value) || 0)) || undefined })} className="w-12 px-1 py-0.5 border border-border-subtle rounded bg-surface text-xs" />
+                </label>
+              )}
+            </>
+          );
+        })()}
         {(running || flowRunning) && (
           <button
             type="button"
@@ -750,7 +781,7 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
           <Icon icon="settings" size="sm" />
         </button>
         {showSettings && (
-          <div data-settings-panel className="absolute top-10 right-2 z-30 w-[300px] bg-surface border border-border-subtle rounded-lg shadow-xl p-3 text-sm">
+          <div data-settings-panel className="absolute top-10 right-2 z-30 w-[300px] max-h-[50vh] overflow-y-auto overscroll-contain bg-surface border border-border-subtle rounded-lg shadow-xl p-3 text-sm">
           <div className="flex items-center justify-between mb-2">
             <span className="font-semibold">Node Space Settings</span>
             <button type="button" onClick={() => setShowSettings(false)} className="w-6 h-6 grid place-items-center rounded hover:bg-surface-highlight text-text-subtle">
@@ -850,6 +881,25 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
           >
             De-overlap nodes
           </button>
+          <div className="h-px bg-border-subtle my-2" />
+          <div className="text-xs font-semibold text-text-subtle mb-1">Delay / Retry</div>
+          <label className="flex items-center gap-2 py-0.5 cursor-pointer text-xs">
+            <input type="checkbox" checked={settings.node.delay} onChange={(e) => setSettings((s) => ({ ...s, node: { ...s.node, delay: e.target.checked } }))} />
+            <span>Enable Delay (ms)</span>
+          </label>
+          <label className="flex items-center gap-2 py-0.5 cursor-pointer text-xs">
+            <input type="checkbox" checked={settings.node.retry} onChange={(e) => setSettings((s) => ({ ...s, node: { ...s.node, retry: e.target.checked } }))} />
+            <span>Enable Retry (count)</span>
+          </label>
+          <div className="text-[10px] text-text-subtle mt-1 mb-1">Show where</div>
+          <label className="flex items-center gap-2 py-0.5 cursor-pointer text-xs">
+            <input type="checkbox" checked={settings.ui.headerDelayRetry} onChange={(e) => setSettings((s) => ({ ...s, ui: { ...s.ui, headerDelayRetry: e.target.checked } }))} />
+            <span>Header (Node Space bar)</span>
+          </label>
+          <label className="flex items-center gap-2 py-0.5 cursor-pointer text-xs">
+            <input type="checkbox" checked={settings.ui.menuDelayRetry} onChange={(e) => setSettings((s) => ({ ...s, ui: { ...s.ui, menuDelayRetry: e.target.checked } }))} />
+            <span>Right-click menu</span>
+          </label>
         </div>
         )}
       </div>
@@ -1122,7 +1172,7 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
           <div
             onClick={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.preventDefault()}
-            className="fixed z-20 min-w-[220px] max-w-[320px] bg-surface border border-border-subtle rounded-lg shadow-xl py-1 text-sm overflow-hidden"
+            className="fixed z-20 min-w-[220px] max-w-[320px] max-h-[50vh] overflow-y-auto overscroll-contain bg-surface border border-border-subtle rounded-lg shadow-xl py-1 text-sm"
             style={{
               left: Math.min(menu.x, window.innerWidth - 240),
               top: Math.min(menu.y, window.innerHeight - 320),
@@ -1168,6 +1218,58 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
                   >
                     ⎘ Duplicate (Ctrl+C / V)
                   </button>
+                )}
+                {settings.ui.menuDelayRetry && (settings.node.delay || settings.node.retry) && (
+                  <>
+                    <div className="h-px bg-border-subtle my-1" />
+                    <div className="px-3 py-1 text-[11px] font-semibold text-text-subtle">Delay / Retry</div>
+                    {settings.node.delay && (
+                      <div className="px-3 py-1 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                        <span className="text-xs flex-1">Delay</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={10000}
+                          step={100}
+                          value={nodes.find((n) => n.id === menu.id)?.data.delayMs ?? 0}
+                          onChange={(e) => {
+                            const v = Math.max(0, parseInt(e.target.value) || 0) || undefined;
+                            const id = menu.id!;
+                            setNodes((prev) => {
+                              const next = prev.map((p) => (p.id === id ? { ...p, data: { ...p.data, delayMs: v } } : p));
+                              saveSoon(next, edges);
+                              return next;
+                            });
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          className="w-12 px-1 py-0.5 border border-border-subtle rounded bg-surface text-xs"
+                        />
+                        <span className="text-[11px] text-text-subtle">ms</span>
+                      </div>
+                    )}
+                    {settings.node.retry && (
+                      <div className="px-3 py-1 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                        <span className="text-xs flex-1">Retry</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={5}
+                          value={nodes.find((n) => n.id === menu.id)?.data.retry ?? 0}
+                          onChange={(e) => {
+                            const v = Math.max(0, Math.min(5, parseInt(e.target.value) || 0)) || undefined;
+                            const id = menu.id!;
+                            setNodes((prev) => {
+                              const next = prev.map((p) => (p.id === id ? { ...p, data: { ...p.data, retry: v } } : p));
+                              saveSoon(next, edges);
+                              return next;
+                            });
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          className="w-12 px-1 py-0.5 border border-border-subtle rounded bg-surface text-xs"
+                        />
+                      </div>
+                    )}
+                  </>
                 )}
                 {(settings.node.run || settings.node.runFlow) && settings.node.del && <div className="h-px bg-border-subtle my-1" />}
                 {settings.node.del && (
@@ -1393,16 +1495,7 @@ export function NodeSpace({ style }: { style?: React.CSSProperties; fullHeight?:
               <span className="font-semibold truncate max-w-[160px]">{sel.data.name}</span>
               <span className="text-text-subtle">{sel.data.method}</span>
               {statusById[sel.id] && <span className={`px-1.5 py-0.5 rounded text-[10px] ${statusById[sel.id] === "ok" ? "bg-success/20 text-success" : statusById[sel.id] === "err" ? "bg-danger/20 text-danger" : "bg-warning/20 text-warning"}`}>{statusById[sel.id]}{elapsedById[sel.id] ? ` ${elapsedById[sel.id]}ms` : ""}</span>}
-              <div className="h-4 w-px bg-border-subtle" />
-              <label className="flex items-center gap-1">
-                Delay
-                <input type="number" min={0} max={10000} step={100} value={sel.data.delayMs ?? 0} onChange={(e) => update({ delayMs: Math.max(0, parseInt(e.target.value) || 0) || undefined })} className="w-16 px-1 py-0.5 border border-border-subtle rounded bg-surface text-xs" />
-                ms
-              </label>
-              <label className="flex items-center gap-1">
-                Retry
-                <input type="number" min={0} max={5} value={sel.data.retry ?? 0} onChange={(e) => update({ retry: Math.max(0, Math.min(5, parseInt(e.target.value) || 0)) || undefined })} className="w-12 px-1 py-0.5 border border-border-subtle rounded bg-surface text-xs" />
-              </label>
+              { (settings.node.delay || settings.node.retry) && <div className="h-4 w-px bg-border-subtle" /> }
               <label className="flex items-center gap-1 cursor-pointer">
                 <input type="checkbox" checked={!!sel.data.continueOnError} onChange={(e) => update({ continueOnError: e.target.checked || undefined })} />
                 Continue on error
