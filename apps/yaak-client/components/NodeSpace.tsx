@@ -34,6 +34,10 @@ export function NodeSpace({ style, fullHeight }: { style?: React.CSSProperties; 
   const [statusById, setStatusById] = useState<Record<string, "ok" | "err" | "run">>({});
   const [branchPrompt, setBranchPrompt] = useState<{ from: string; targets: Node[] } | null>(null);
   const [flowRunning, setFlowRunning] = useState(false);
+  const [branchPos, setBranchPos] = useState<{ x: number; y: number } | null>(null);
+  const [branchDrag, setBranchDrag] = useState<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+
+  useEffect(() => { if (branchPrompt) setBranchPos(null); }, [branchPrompt]);
   const [log, setLog] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const nextId = useRef(1);
@@ -510,9 +514,30 @@ export function NodeSpace({ style, fullHeight }: { style?: React.CSSProperties; 
         </div>
 
         {branchPrompt && (
-          <div className="absolute inset-0 bg-backdrop/40 grid place-items-center z-10">
-            <div className="bg-surface border border-border-subtle rounded-lg shadow-lg p-4 min-w-[320px] max-w-[90%]">
-              <div className="text-sm font-semibold mb-1">Branch: {nodes.find((n) => n.id === branchPrompt.from)?.data.name ?? branchPrompt.from} → ?</div>
+          <div className="absolute inset-0 bg-backdrop/40 z-10" onClick={() => setBranchPos(null)}>
+            <div
+              className="bg-surface border border-border-subtle rounded-lg shadow-lg p-4 min-w-[320px] max-w-[90%] absolute"
+              style={branchPos ? { left: branchPos.x, top: branchPos.y, transform: "none" } : { left: "50%", top: "50%", transform: "translate(-50%, -50%)" }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div
+                className="text-sm font-semibold mb-1 cursor-move select-none flex items-center gap-2"
+                onPointerDown={(e) => {
+                  const cur = branchPos ?? { x: window.innerWidth/2 - 160, y: window.innerHeight/2 - 100 };
+                  setBranchDrag({ sx: e.clientX, sy: e.clientY, ox: cur.x, oy: cur.y });
+                  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+                }}
+                onPointerMove={(e) => {
+                  if (!branchDrag) return;
+                  setBranchPos({ x: branchDrag.ox + (e.clientX - branchDrag.sx), y: branchDrag.oy + (e.clientY - branchDrag.sy) });
+                }}
+                onPointerUp={(e) => {
+                  if (branchDrag) { setBranchDrag(null); try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch {} }
+                }}
+                title="Drag to move"
+              >
+                <span className="cursor-move opacity-60">⋮⋮</span> Branch: {nodes.find((n) => n.id === branchPrompt.from)?.data.name ?? branchPrompt.from} → ?
+              </div>
               <div className="text-xs text-text-subtle mb-3">Select which way to continue flow</div>
               <div className="flex flex-col gap-2">
                 {branchPrompt.targets.map((t, i) => (
